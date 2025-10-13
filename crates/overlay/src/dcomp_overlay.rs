@@ -227,7 +227,7 @@ impl DCompOverlay {
 
         // CRITICAL: Exclude from screen capture (like Xbox Game Bar)
         use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE};
-        if let Err(e) = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) {
+        if let Err(_) = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) {
             print_debug!("Warning: Failed to exclude window from capture: {:?}", e);
         } else {
             print_debug!("✓ Window excluded from Desktop Duplication (WDA_EXCLUDEFROMCAPTURE)");

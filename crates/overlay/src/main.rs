@@ -2,7 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capture;
-mod renderer;
 mod monitor;
 mod window_flags;
 mod dcomp_overlay;
