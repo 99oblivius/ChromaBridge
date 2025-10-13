@@ -1,0 +1,107 @@
+// Hide console window on Windows
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod capture;
+mod renderer;
+mod monitor;
+mod window_flags;
+mod dcomp_overlay;
+
+use anyhow::Result;
+use color_interlacer_core::{Config, HueMapper, NoiseTexture, SpectrumPair};
+use std::sync::Arc;
+use parking_lot::RwLock;
+
+pub struct OverlayState {
+    pub spectrum_pair: SpectrumPair,
+    pub noise_texture: Option<NoiseTexture>,
+    pub hue_mapper: HueMapper,
+    pub monitor_index: usize,
+    pub fps: f32,
+    pub frame_time_ms: f32,
+}
+
+// Simple print macro for overlay (no file logging)
+#[macro_export]
+macro_rules! print_debug {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        println!($($arg)*)
+    };
+}
+
+fn main() -> Result<()> {
+    let config = Config::new()?;
+
+    // Parse command line arguments
+    let args: Vec<String> = std::env::args().collect();
+    let mut monitor_index = 0;
+    let mut spectrum_name = String::new();
+    let mut noise_name: Option<String> = None;
+    let mut strength = 1.0;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--monitor" => {
+                if i + 1 < args.len() {
+                    monitor_index = args[i + 1].parse().unwrap_or(0);
+                    i += 1;
+                }
+            }
+            "--spectrum" => {
+                if i + 1 < args.len() {
+                    spectrum_name = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "--noise" => {
+                if i + 1 < args.len() {
+                    noise_name = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--strength" => {
+                if i + 1 < args.len() {
+                    strength = args[i + 1].parse().unwrap_or(1.0);
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    print_debug!("Monitor: {}, Spectrum: {}, Strength: {}",
+                monitor_index, spectrum_name, strength);
+
+    // Load spectrum
+    let spectrum_path = config.get_spectrum_path(&spectrum_name);
+    let spectrum_pair = SpectrumPair::load_from_file(spectrum_path)?;
+
+    // Load noise texture if specified
+    let noise_texture = if let Some(ref name) = noise_name {
+        let noise_path = config.get_noise_path(name);
+        Some(NoiseTexture::load_from_file(noise_path)?)
+    } else {
+        None
+    };
+
+    // Create hue mapper with command line strength
+    let hue_mapper = HueMapper::new(strength);
+
+    // Create overlay state
+    let state = Arc::new(RwLock::new(OverlayState {
+        spectrum_pair,
+        noise_texture,
+        hue_mapper,
+        monitor_index,
+        fps: 0.0,
+        frame_time_ms: 0.0,
+    }));
+
+    // Run DirectComposition overlay (like Xbox Game Bar)
+    print_debug!("Starting DirectComposition overlay...");
+    let mut overlay = dcomp_overlay::DCompOverlay::new(state)?;
+    overlay.run_message_loop()
+}
