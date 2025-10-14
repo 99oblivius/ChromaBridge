@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo tree:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(dir:*)",
+      "Bash(cargo clean:*)",
+      "Bash(cargo update)",
+      "Bash(cargo add:*)",
+      "Bash(cargo remove:*)",
+      "Bash(cmd /c:*)",
+      "Bash(cargo run:*)",
+      "Bash(cargo search:*)",
+      "Bash(cargo info:*)",
+      "Bash(timeout:*)",
+      "Bash(ls:*)",
+      "Read(//c/Users/Livia/AppData/Roaming/ColorInterlacer/logs/**)",
+      "Bash(tasklist)",
+      "Bash(findstr:*)",
+      "Bash(powershell:*)",
+      "WebSearch",
+      "mcp__ide__getDiagnostics"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
