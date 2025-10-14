@@ -1,0 +1,397 @@
+use crate::StateManager;
+use anyhow::Result;
+use std::sync::Arc;
+use std::time::Instant;
+
+#[cfg(windows)]
+use windows::{
+    core::BOOL,
+    Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+        DEVMODEW, ENUM_CURRENT_SETTINGS,
+    },
+};
+
+#[derive(Debug, Clone)]
+pub struct MonitorInfo {
+    pub index: usize,
+    pub name: String,
+    pub is_primary: bool,
+    pub width: i32,
+    pub height: i32,
+    pub refresh_rate: u32,
+}
+
+#[cfg(windows)]
+pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
+    use std::sync::Mutex;
+
+    let monitors = Mutex::new(Vec::new());
+
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(monitor_enum_proc),
+            windows::Win32::Foundation::LPARAM(&monitors as *const _ as isize),
+        );
+    }
+
+    let mut result = monitors.into_inner().unwrap();
+    result.sort_by(|a: &MonitorInfo, b: &MonitorInfo| {
+        b.is_primary.cmp(&a.is_primary).then(a.index.cmp(&b.index))
+    });
+
+    Ok(result)
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn monitor_enum_proc(
+    hmonitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut windows::Win32::Foundation::RECT,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> BOOL {
+    use std::sync::Mutex;
+    let monitors = &*(lparam.0 as *const Mutex<Vec<MonitorInfo>>);
+
+    let mut info: MONITORINFOEXW = std::mem::zeroed();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+
+    if GetMonitorInfoW(hmonitor, &mut info as *mut _ as *mut _).as_bool() {
+        let rect = info.monitorInfo.rcMonitor;
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        let is_primary = (info.monitorInfo.dwFlags & 1) != 0;
+
+        let name = String::from_utf16_lossy(
+            &info.szDevice.iter().take_while(|&&c| c != 0).copied().collect::<Vec<_>>(),
+        );
+
+        let refresh_rate = {
+            let mut dev_mode: DEVMODEW = std::mem::zeroed();
+            dev_mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+
+            if EnumDisplaySettingsW(
+                windows::core::PCWSTR(info.szDevice.as_ptr()),
+                ENUM_CURRENT_SETTINGS,
+                &mut dev_mode,
+            ).as_bool() {
+                dev_mode.dmDisplayFrequency
+            } else {
+                60
+            }
+        };
+
+        let mut monitors = monitors.lock().unwrap();
+        let index = monitors.len();
+
+        monitors.push(MonitorInfo {
+            index,
+            name,
+            is_primary,
+            width,
+            height,
+            refresh_rate,
+        });
+    }
+
+    true.into()
+}
+
+#[cfg(not(windows))]
+pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
+    Ok(vec![MonitorInfo {
+        index: 0,
+        name: "Primary Monitor".to_string(),
+        is_primary: true,
+        width: 1920,
+        height: 1080,
+        refresh_rate: 60,
+    }])
+}
+
+pub struct SettingsGui {
+    state: Arc<StateManager>,
+
+    monitors: Vec<MonitorInfo>,
+    selected_monitor: usize,
+
+    spectrum_files: Vec<String>,
+    selected_spectrum: Option<usize>,
+
+    noise_files: Vec<String>,
+    selected_noise: Option<usize>,
+
+    strength: f32,
+    strength_changed: bool,
+    strength_last_change: Instant,
+
+    show_advanced: bool,
+    status_message: Option<String>,
+
+    overlay_callback: Option<Box<dyn Fn() + Send>>,
+}
+
+impl SettingsGui {
+    pub fn new(state: Arc<StateManager>) -> Self {
+        let monitors = enumerate_monitors().unwrap_or_default();
+
+        let (selected_monitor, selected_spectrum, selected_noise, strength, show_advanced) = state.read(|s| {
+            let monitor = s.last_monitor.unwrap_or(0).min(monitors.len().saturating_sub(1));
+            let spectrum = s.spectrum_name.as_ref().and_then(|name| {
+                state.list_spectrum_files().ok()?.into_iter().position(|s| s == *name)
+            });
+            let noise = s.noise_texture.as_ref().and_then(|name| {
+                state.list_noise_files().ok()?.into_iter().position(|n| n == *name)
+            });
+            (monitor, spectrum, noise, s.strength, false)
+        });
+
+        let spectrum_files = state.list_spectrum_files().unwrap_or_default();
+        let noise_files = state.list_noise_files().unwrap_or_default();
+
+        Self {
+            state,
+            monitors,
+            selected_monitor,
+            spectrum_files,
+            selected_spectrum,
+            noise_files,
+            selected_noise,
+            strength,
+            strength_changed: false,
+            strength_last_change: Instant::now(),
+            show_advanced,
+            status_message: None,
+            overlay_callback: None,
+        }
+    }
+
+    pub fn set_overlay_callback<F>(&mut self, callback: F)
+    where
+        F: Fn() + Send + 'static,
+    {
+        self.overlay_callback = Some(Box::new(callback));
+    }
+
+    fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+        if text.chars().count() <= max_chars {
+            text.to_string()
+        } else {
+            let mut result: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+            result.push('…');
+            result
+        }
+    }
+
+    fn refresh_assets(&mut self) {
+        self.spectrum_files = self.state.list_spectrum_files().unwrap_or_default();
+        self.noise_files = self.state.list_noise_files().unwrap_or_default();
+
+        if let Some(idx) = self.selected_spectrum {
+            if idx >= self.spectrum_files.len() {
+                self.selected_spectrum = None;
+            }
+        }
+
+        if let Some(idx) = self.selected_noise {
+            if idx >= self.noise_files.len() {
+                self.selected_noise = None;
+            }
+        }
+
+        self.status_message = Some(format!(
+            "Refreshed: {} spectrums, {} noise textures",
+            self.spectrum_files.len(),
+            self.noise_files.len()
+        ));
+    }
+
+    fn open_asset_folder(&self) {
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            let assets_dir = self.state.app_data_dir().join("assets");
+            let _ = Command::new("explorer").arg(assets_dir.to_str().unwrap_or("")).spawn();
+        }
+    }
+
+    fn restart_overlay_if_needed(&mut self) {
+        if let Some(ref callback) = self.overlay_callback {
+            callback();
+        }
+    }
+}
+
+impl eframe::App for SettingsGui {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("ChromaBridge");
+                ui.add_space(15.0);
+
+                let overlay_running = self.state.read(|s| s.overlay_enabled);
+
+                ui.horizontal(|ui| {
+                    let button_text = if overlay_running { "Stop Overlay" } else { "Start Overlay" };
+                    let button = egui::Button::new(button_text).min_size(egui::vec2(120.0, 30.0));
+                    if ui.add(button).clicked() {
+                        if let Some(ref callback) = self.overlay_callback {
+                            callback();
+                        }
+                    }
+                });
+
+                ui.add_space(20.0);
+                ui.separator();
+                ui.add_space(15.0);
+
+                egui::Grid::new("correction_grid")
+                    .num_columns(2)
+                    .spacing([20.0, 10.0])
+                    .show(ui, |ui| {
+                        if self.monitors.len() > 1 {
+                            ui.label("Monitor:");
+                            let mut monitor_changed = false;
+                            egui::ComboBox::from_id_salt("monitor_select")
+                                .selected_text(format!("{} ({}x{})",
+                                    self.monitors[self.selected_monitor].name,
+                                    self.monitors[self.selected_monitor].width,
+                                    self.monitors[self.selected_monitor].height))
+                                .show_ui(ui, |ui| {
+                                    for (idx, monitor) in self.monitors.iter().enumerate() {
+                                        let label = format!("{} ({}x{} @ {}Hz){}",
+                                            monitor.name, monitor.width, monitor.height,
+                                            monitor.refresh_rate,
+                                            if monitor.is_primary { " [Primary]" } else { "" });
+
+                                        if ui.selectable_value(&mut self.selected_monitor, idx, label).clicked() {
+                                            monitor_changed = true;
+                                        }
+                                    }
+                                });
+                            if monitor_changed {
+                                self.state.update(|s| s.last_monitor = Some(self.selected_monitor));
+                                self.restart_overlay_if_needed();
+                            }
+                            ui.end_row();
+                        }
+
+                        ui.label("Color Blind Type:");
+                        let spectrum_text = self.selected_spectrum
+                            .map(|i| self.spectrum_files.get(i).map(|s| Self::truncate_with_ellipsis(s, 30)).unwrap_or_else(|| "Invalid".to_string()))
+                            .unwrap_or_else(|| "None".to_string());
+                        let mut spectrum_changed = None;
+                        egui::ComboBox::from_id_salt("spectrum_select")
+                            .selected_text(spectrum_text)
+                            .show_ui(ui, |ui| {
+                                for (idx, spectrum) in self.spectrum_files.iter().enumerate() {
+                                    if ui.selectable_label(self.selected_spectrum == Some(idx), spectrum).clicked() {
+                                        self.selected_spectrum = Some(idx);
+                                        spectrum_changed = Some(spectrum.clone());
+                                    }
+                                }
+                            });
+                        if let Some(spectrum) = spectrum_changed {
+                            self.state.update(|s| s.spectrum_name = Some(spectrum));
+                            self.restart_overlay_if_needed();
+                        }
+                        ui.end_row();
+
+                        ui.label("Correction Strength:");
+                        if ui.add(egui::Slider::new(&mut self.strength, 0.0..=1.0).text("")).changed() {
+                            self.state.update(|s| s.strength = self.strength);
+                            self.strength_changed = true;
+                            self.strength_last_change = Instant::now();
+                        }
+                        ui.end_row();
+
+                        ui.label("Noise Pattern:");
+                        let noise_text = self.selected_noise
+                            .map(|i| self.noise_files.get(i).map(|n| Self::truncate_with_ellipsis(n, 30)).unwrap_or_else(|| "Invalid".to_string()))
+                            .unwrap_or_else(|| "None".to_string());
+                        let mut noise_changed: Option<Option<String>> = None;
+                        egui::ComboBox::from_id_salt("noise_select")
+                            .selected_text(noise_text)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(self.selected_noise.is_none(), "None").clicked() {
+                                    self.selected_noise = None;
+                                    noise_changed = Some(None);
+                                }
+
+                                for (idx, noise) in self.noise_files.iter().enumerate() {
+                                    if ui.selectable_label(self.selected_noise == Some(idx), noise).clicked() {
+                                        self.selected_noise = Some(idx);
+                                        noise_changed = Some(Some(noise.clone()));
+                                    }
+                                }
+                            });
+                        if let Some(noise) = noise_changed {
+                            self.state.update(|s| s.noise_texture = noise);
+                            self.restart_overlay_if_needed();
+                        }
+                        ui.end_row();
+                    });
+
+                ui.add_space(20.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                let header_response = egui::CollapsingHeader::new("Advanced Settings")
+                    .default_open(self.show_advanced)
+                    .show(ui, |ui| {
+                        ui.add_space(10.0);
+
+                        ui.label("Asset Management:");
+                        ui.horizontal(|ui| {
+                            if ui.button("Open Asset Folder").clicked() {
+                                self.open_asset_folder();
+                            }
+
+                            if ui.button("Refresh Assets").clicked() {
+                                self.refresh_assets();
+                            }
+                        });
+
+                        ui.add_space(15.0);
+
+                        ui.label("System Options:");
+                        let mut run_at_startup = self.state.read(|s| s.run_at_startup);
+                        if ui.checkbox(&mut run_at_startup, "Run at Windows startup").changed() {
+                            self.state.update(|s| s.run_at_startup = run_at_startup);
+                        }
+
+                        let mut start_overlay_on_launch = self.state.read(|s| s.start_overlay_on_launch);
+                        if ui.checkbox(&mut start_overlay_on_launch, "Start overlay on launch").changed() {
+                            self.state.update(|s| s.start_overlay_on_launch = start_overlay_on_launch);
+                        }
+
+                        let mut keep_running_in_tray = self.state.read(|s| s.keep_running_in_tray);
+                        if ui.checkbox(&mut keep_running_in_tray, "Keep running in Tray").changed() {
+                            self.state.update(|s| s.keep_running_in_tray = keep_running_in_tray);
+                        }
+
+                        ui.add_space(10.0);
+                    });
+
+                let is_open = header_response.openness > 0.5;
+                if is_open != self.show_advanced {
+                    self.show_advanced = is_open;
+                }
+
+                ui.add_space(15.0);
+
+                if let Some(ref msg) = self.status_message {
+                    ui.label(msg);
+                }
+            });
+        });
+
+        if self.strength_changed && self.strength_last_change.elapsed() > std::time::Duration::from_millis(500) {
+            self.strength_changed = false;
+            self.restart_overlay_if_needed();
+        }
+    }
+}
+
