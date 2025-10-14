@@ -2,10 +2,15 @@
 name = "color-interlacer-overlay"
 version.workspace = true
 edition.workspace = true
+description = "Color Interlacer Overlay - Ultra-fast DirectComposition overlay renderer"
+authors.workspace = true
 
 [[bin]]
 name = "color-interlacer-overlay"
 path = "src/main.rs"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
 
 [dependencies]
 color-interlacer-core = { path = "../core" }

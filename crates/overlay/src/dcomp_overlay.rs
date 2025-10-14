@@ -4,7 +4,8 @@
 use anyhow::Result;
 use std::sync::Arc;
 use parking_lot::RwLock;
-use crate::{OverlayState, capture::DesktopDuplication, print_debug};
+use crate::{OverlayState, capture::DesktopDuplication};
+use color_interlacer_core::{log_info, log_warn, log_error};
 
 #[cfg(windows)]
 use windows::{
@@ -90,10 +91,12 @@ pub struct DCompOverlay {
 
     width: u32,
     height: u32,
+    monitor_refresh_rate: u32,
     state: Arc<RwLock<OverlayState>>,
     duplication: DesktopDuplication,
     frame_count: u32,
     fps_timer: std::time::Instant,
+    frame_start_timer: std::time::Instant,
 }
 
 impl DCompOverlay {
@@ -106,9 +109,10 @@ impl DCompOverlay {
                 windows::Win32::System::Com::COINIT_MULTITHREADED,
             );
 
-            // Get monitor dimensions
+            // Get monitor dimensions and refresh rate
             let monitor_index = state.read().monitor_index;
-            let (pos, size) = crate::monitor::get_monitor_rect(monitor_index)?;
+            let monitor_info = crate::monitor::get_monitor_info(monitor_index)?;
+            let (pos, size) = (monitor_info.pos, monitor_info.size);
 
             // Create Desktop Duplication capture
             let duplication = DesktopDuplication::new(monitor_index)?;
@@ -139,9 +143,10 @@ impl DCompOverlay {
             // Commit composition
             dcomp_device.Commit()?;
 
-            print_debug!("✓ DirectComposition overlay initialized");
-            print_debug!("  Size: {}x{}", size.0, size.1);
-            print_debug!("  Position: ({}, {})", pos.0, pos.1);
+            log_info!("DirectComposition overlay initialized");
+            log_info!("  Size: {}x{}", size.0, size.1);
+            log_info!("  Position: ({}, {})", pos.0, pos.1);
+            log_info!("  Refresh rate: {} Hz", monitor_info.refresh_rate);
 
             let mut overlay = Self {
                 hwnd,
@@ -172,10 +177,12 @@ impl DCompOverlay {
                 d2d_brush: None,
                 width: size.0 as u32,
                 height: size.1 as u32,
+                monitor_refresh_rate: monitor_info.refresh_rate,
                 state,
                 duplication,
                 frame_count: 0,
                 fps_timer: std::time::Instant::now(),
+                frame_start_timer: std::time::Instant::now(),
             };
 
             // Initialize rendering pipeline
@@ -227,10 +234,10 @@ impl DCompOverlay {
 
         // CRITICAL: Exclude from screen capture (like Xbox Game Bar)
         use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE};
-        if let Err(_) = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) {
-            print_debug!("Warning: Failed to exclude window from capture: {:?}", e);
+        if let Err(e) = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) {
+            log_warn!("Failed to exclude window from capture: {:?}", e);
         } else {
-            print_debug!("✓ Window excluded from Desktop Duplication (WDA_EXCLUDEFROMCAPTURE)");
+            log_info!("Window excluded from Desktop Duplication (WDA_EXCLUDEFROMCAPTURE)");
         }
 
         // Show window
@@ -490,7 +497,7 @@ impl DCompOverlay {
         self.d3d_device.CreateBlendState(&blend_desc, Some(&mut blend_state))?;
         self.blend_state = blend_state;
 
-        print_debug!("✓ Rendering pipeline initialized");
+        log_info!("Rendering pipeline initialized");
 
         Ok(())
     }
@@ -698,7 +705,9 @@ impl DCompOverlay {
         self.d3d_device.CreateBuffer(&cb_desc, Some(&cb_init_data), Some(&mut constant_buffer))?;
         self.constant_buffer = constant_buffer;
 
-        print_debug!("✓ Spectrum textures initialized");
+        log_info!("Spectrum textures initialized (dual: {}, noise: {})",
+                 state.spectrum_pair.has_dual_spectrum(),
+                 state.noise_texture.is_some());
 
         Ok(())
     }
@@ -706,6 +715,9 @@ impl DCompOverlay {
     pub fn render_frame(&mut self) -> Result<()> {
         #[cfg(windows)]
         unsafe {
+            // Start frame timing
+            self.frame_start_timer = std::time::Instant::now();
+
             // Capture frame from Desktop Duplication
             let pixels = match self.duplication.capture_frame()? {
                 Some(p) => p,
@@ -863,16 +875,18 @@ impl DCompOverlay {
             // Draw fullscreen quad (6 vertices = 2 triangles)
             self.d3d_context.Draw(6, 0);
 
+            // Calculate actual frame computation time (before VSync wait)
+            let frame_compute_time_ms = self.frame_start_timer.elapsed().as_secs_f32() * 1000.0;
+
             // Update FPS counter
             self.frame_count += 1;
             let elapsed = self.fps_timer.elapsed().as_secs_f32();
             if elapsed >= 0.5 {
                 let fps = self.frame_count as f32 / elapsed;
-                let frame_time = elapsed * 1000.0 / self.frame_count as f32;
 
                 let mut state = self.state.write();
                 state.fps = fps;
-                state.frame_time_ms = frame_time;
+                state.frame_time_ms = frame_compute_time_ms;
 
                 // TODO: Render on-screen debug overlay if debug_overlay is enabled
                 // Show: Resolution, FPS, Frame Time, Spectrum, Noise, Strength
@@ -881,8 +895,8 @@ impl DCompOverlay {
                 self.fps_timer = std::time::Instant::now();
             }
 
-            // Present - use 0 for no vsync to match display refresh rate
-            self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
+            // Present with VSync (1) to sync to monitor refresh rate
+            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
 
             // Commit DirectComposition changes
             self.dcomp_device.Commit()?;
@@ -896,11 +910,16 @@ impl DCompOverlay {
         #[cfg(windows)]
         unsafe {
             let mut msg = MSG::default();
+            let mut last_error_log = std::time::Instant::now();
+            let mut error_count = 0u32;
 
             loop {
                 // Non-blocking message processing
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                     if msg.message == WM_QUIT {
+                        if error_count > 0 {
+                            log_warn!("Exiting with {} render errors encountered", error_count);
+                        }
                         return Ok(());
                     }
                     let _ = TranslateMessage(&msg);
@@ -909,7 +928,13 @@ impl DCompOverlay {
 
                 // Render frame with Desktop Duplication capture
                 if let Err(e) = self.render_frame() {
-                    eprintln!("Render error: {}", e);
+                    error_count += 1;
+
+                    // Rate-limited error logging (max 1 per second)
+                    if last_error_log.elapsed().as_secs() >= 1 {
+                        log_error!("Render error (count: {}): {}", error_count, e);
+                        last_error_log = std::time::Instant::now();
+                    }
                 }
 
                 // No sleep - run as fast as possible to match display refresh rate

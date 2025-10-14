@@ -3,6 +3,7 @@ members = [
     "crates/core",
     "crates/gui",
     "crates/overlay",
+    "crates/tray",
 ]
 resolver = "2"
 

@@ -1,5 +1,6 @@
-use color_interlacer_core::DbConfig;
+use color_interlacer_core::{DbConfig, log_info, log_error, log_warn};
 use crate::monitors::{enumerate_monitors, MonitorInfo};
+use crate::ipc_client::IpcClientWrapper;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,9 @@ pub struct ColorInterlacerApp {
 
     // Status message
     status_message: Option<String>,
+
+    // IPC client for tray communication
+    ipc_client: Option<IpcClientWrapper>,
 }
 
 impl ColorInterlacerApp {
@@ -43,7 +47,7 @@ impl ColorInterlacerApp {
 
         // Migrate from JSON if exists
         if let Err(e) = config.migrate_from_json() {
-            eprintln!("Warning: Failed to migrate from JSON: {}", e);
+            log_warn!("Failed to migrate from JSON: {}", e);
         }
 
         let monitors = enumerate_monitors().unwrap_or_default();
@@ -60,12 +64,20 @@ impl ColorInterlacerApp {
         });
 
         let strength = config.get_strength();
+        let show_advanced = config.get_advanced_settings_open();
 
-        Self {
+        // Connect to tray service
+        let ipc_client = IpcClientWrapper::connect();
+        ipc_client.send(color_interlacer_core::GuiMessage::Ready);
+
+        // Auto-start overlay if enabled
+        let should_auto_start = config.get_start_overlay_on_launch() && selected_spectrum.is_some();
+
+        let mut app = Self {
             config,
             overlay_running: false,
             overlay_process: None,
-            show_advanced: false,
+            show_advanced,
             monitors,
             selected_monitor,
             spectrum_files,
@@ -79,6 +91,24 @@ impl ColorInterlacerApp {
             frame_time_ms: 0.0,
             last_fps_update: Instant::now(),
             status_message: None,
+            ipc_client: Some(ipc_client),
+        };
+
+        if should_auto_start {
+            app.start_overlay();
+        }
+
+        app
+    }
+
+    /// Truncate text with ellipsis if it exceeds max_chars
+    fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+        if text.chars().count() <= max_chars {
+            text.to_string()
+        } else {
+            let mut result: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+            result.push('…');
+            result
         }
     }
 
@@ -104,7 +134,7 @@ impl ColorInterlacerApp {
 
                 // Validate the spectrum file before starting
                 if !self.config.validate_spectrum_file(name) {
-                    crate::log_info!("Spectrum file '{}' is invalid, removing from list", name);
+                    log_warn!("Spectrum file '{}' is invalid, removing from list", name);
                     self.status_message = Some(format!("Spectrum '{}' is invalid and has been removed", name));
 
                     // Refresh to remove invalid files
@@ -126,7 +156,7 @@ impl ColorInterlacerApp {
                 let noise_name = &self.noise_files[noise_idx];
 
                 if !self.config.validate_noise_file(noise_name) {
-                    crate::log_info!("Noise file '{}' is invalid, removing from list", noise_name);
+                    log_warn!("Noise file '{}' is invalid, removing from list", noise_name);
                     self.status_message = Some(format!("Noise texture '{}' is invalid and has been removed", noise_name));
 
                     // Clear noise selection and refresh
@@ -156,7 +186,7 @@ impl ColorInterlacerApp {
 
         match cmd.spawn() {
             Ok(child) => {
-                crate::log_info!("Overlay started: monitor={}, spectrum={}, strength={}",
+                log_info!("Overlay started: monitor={}, spectrum={}, strength={}",
                                 self.selected_monitor, spectrum_name, self.strength);
                 self.overlay_process = Some(child);
                 self.overlay_running = true;
@@ -168,9 +198,16 @@ impl ColorInterlacerApp {
                 self.config.set_noise_texture(self.selected_noise.map(|i| self.noise_files[i].clone()));
                 self.config.set_strength(self.strength);
                 self.config.set_overlay_enabled(true);
+
+                // Notify tray service
+                if let Some(ref ipc) = self.ipc_client {
+                    ipc.send(color_interlacer_core::GuiMessage::OverlayStarted {
+                        spectrum: spectrum_name.to_string(),
+                    });
+                }
             }
             Err(e) => {
-                crate::log_info!("Failed to start overlay: {}", e);
+                log_error!("Failed to start overlay: {}", e);
                 self.status_message = Some(format!("Failed to start overlay: {}", e));
             }
         }
@@ -178,7 +215,7 @@ impl ColorInterlacerApp {
 
     fn stop_overlay(&mut self) {
         if let Some(mut child) = self.overlay_process.take() {
-            crate::log_info!("Stopping overlay process");
+            log_info!("Stopping overlay process");
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -187,6 +224,11 @@ impl ColorInterlacerApp {
         self.status_message = Some("Overlay stopped".to_string());
 
         self.config.set_overlay_enabled(false);
+
+        // Notify tray service
+        if let Some(ref ipc) = self.ipc_client {
+            ipc.send(color_interlacer_core::GuiMessage::OverlayStopped);
+        }
     }
 
     fn open_asset_folder(&self) {
@@ -196,6 +238,26 @@ impl ColorInterlacerApp {
                 .arg(self.config.assets_dir().to_str().unwrap_or(""))
                 .spawn();
         }
+    }
+
+    /// Gracefully exit the application
+    fn graceful_exit(&mut self) {
+        log_info!("Graceful exit requested");
+
+        // Notify tray service we're closing
+        if let Some(ref ipc) = self.ipc_client {
+            ipc.send(color_interlacer_core::GuiMessage::Closing);
+        }
+
+        // Kill overlay process if running
+        if let Some(mut child) = self.overlay_process.take() {
+            log_info!("Terminating overlay process");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        self.overlay_running = false;
+        log_info!("Cleanup complete, exiting");
     }
 
     fn refresh_assets(&mut self) {
@@ -313,10 +375,11 @@ impl ColorInterlacerApp {
 
                         // Colorblind type selection
                         ui.label("Color Blind Type:");
+                        let spectrum_text = self.selected_spectrum
+                            .map(|i| self.spectrum_files.get(i).map(|s| Self::truncate_with_ellipsis(s, 30)).unwrap_or_else(|| "Invalid".to_string()))
+                            .unwrap_or_else(|| "None".to_string());
                         egui::ComboBox::from_id_salt("spectrum_select")
-                            .selected_text(self.selected_spectrum
-                                .map(|i| self.spectrum_files.get(i).map(|s| s.as_str()).unwrap_or("Invalid"))
-                                .unwrap_or("None"))
+                            .selected_text(spectrum_text)
                             .show_ui(ui, |ui| {
                                 let mut selected_spectrum_name: Option<String> = None;
 
@@ -329,7 +392,7 @@ impl ColorInterlacerApp {
                                             selected_spectrum_name = Some(spectrum.clone());
                                         } else {
                                             self.status_message = Some(format!("Spectrum '{}' is invalid", spectrum));
-                                            crate::log_info!("User attempted to select invalid spectrum: {}", spectrum);
+                                            log_warn!("User attempted to select invalid spectrum: {}", spectrum);
                                         }
                                     }
                                 }
@@ -353,10 +416,11 @@ impl ColorInterlacerApp {
 
                         // Noise pattern selection
                         ui.label("Noise Pattern:");
+                        let noise_text = self.selected_noise
+                            .map(|i| self.noise_files.get(i).map(|n| Self::truncate_with_ellipsis(n, 30)).unwrap_or_else(|| "Invalid".to_string()))
+                            .unwrap_or_else(|| "None".to_string());
                         egui::ComboBox::from_id_salt("noise_select")
-                            .selected_text(self.selected_noise
-                                .map(|i| self.noise_files.get(i).map(|n| n.as_str()).unwrap_or("Invalid"))
-                                .unwrap_or("None"))
+                            .selected_text(noise_text)
                             .show_ui(ui, |ui| {
                                 let mut noise_changed = false;
                                 let mut selected_noise_name: Option<Option<String>> = None;
@@ -378,7 +442,7 @@ impl ColorInterlacerApp {
                                             noise_changed = true;
                                         } else {
                                             self.status_message = Some(format!("Noise texture '{}' is invalid", noise));
-                                            crate::log_info!("User attempted to select invalid noise texture: {}", noise);
+                                            log_warn!("User attempted to select invalid noise texture: {}", noise);
                                         }
                                     }
                                 }
@@ -399,7 +463,7 @@ impl ColorInterlacerApp {
                 ui.add_space(10.0);
 
                 // Advanced settings collapsible section
-                egui::CollapsingHeader::new("Advanced Settings")
+                let header_response = egui::CollapsingHeader::new("Advanced Settings")
                     .default_open(self.show_advanced)
                     .show(ui, |ui| {
                         ui.add_space(10.0);
@@ -425,8 +489,25 @@ impl ColorInterlacerApp {
                             self.config.set_run_at_startup(run_at_startup);
                         }
 
+                        let mut start_overlay_on_launch = self.config.get_start_overlay_on_launch();
+                        if ui.checkbox(&mut start_overlay_on_launch, "Start overlay on launch").changed() {
+                            self.config.set_start_overlay_on_launch(start_overlay_on_launch);
+                        }
+
+                        let mut keep_running_in_tray = self.config.get_keep_running_in_tray();
+                        if ui.checkbox(&mut keep_running_in_tray, "Keep running in Tray").changed() {
+                            self.config.set_keep_running_in_tray(keep_running_in_tray);
+                        }
+
                         ui.add_space(10.0);
                     });
+
+                // Track and persist advanced settings open state
+                let is_open = header_response.openness > 0.5;
+                if is_open != self.show_advanced {
+                    self.show_advanced = is_open;
+                    self.config.set_advanced_settings_open(is_open);
+                }
 
                 ui.add_space(15.0);
             });
@@ -436,6 +517,94 @@ impl ColorInterlacerApp {
 
 impl eframe::App for ColorInterlacerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle close button based on "Keep running in Tray" setting
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let keep_running = self.config.get_keep_running_in_tray();
+
+            if keep_running {
+                // Keep tray AND overlay running, just close GUI
+                log_info!("Window close requested, keeping tray and overlay running");
+
+                // Send overlay PID to tray so it can manage it
+                if let Some(ref child) = self.overlay_process {
+                    let overlay_pid = child.id();
+                    log_info!("Transferring overlay process (PID: {}) to tray", overlay_pid);
+
+                    // Get current spectrum name
+                    let spectrum_name = self.selected_spectrum
+                        .and_then(|idx| self.spectrum_files.get(idx))
+                        .cloned();
+
+                    // Send status update with overlay still running
+                    if let Some(ref ipc) = self.ipc_client {
+                        ipc.send(color_interlacer_core::GuiMessage::StatusUpdate {
+                            spectrum: spectrum_name,
+                            overlay_running: true,
+                        });
+                    }
+                }
+
+                // Notify tray that GUI is closing (but keep tray and overlay running)
+                if let Some(ref ipc) = self.ipc_client {
+                    ipc.send(color_interlacer_core::GuiMessage::Closing);
+                }
+
+                // Release overlay handle without killing it
+                self.overlay_process.take();
+            } else {
+                // Exit everything (tray + overlay + GUI)
+                log_info!("Window close requested, exiting everything");
+
+                // Stop overlay if running
+                self.stop_overlay();
+
+                // Tell tray to shutdown completely
+                if let Some(ref ipc) = self.ipc_client {
+                    ipc.send(color_interlacer_core::GuiMessage::ExitAll);
+                }
+
+                // Give tray a moment to process exit command
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+
+        // Check for messages from tray service
+        use color_interlacer_core::TrayMessage;
+        let mut tray_messages = Vec::new();
+        if let Some(ref ipc) = self.ipc_client {
+            while let Some(message) = ipc.try_recv() {
+                tray_messages.push(message);
+            }
+        }
+
+        // Process tray messages (after releasing the borrow)
+        for message in tray_messages {
+            log_info!("Processing tray command: {:?}", message);
+            match message {
+                TrayMessage::ShowWindow => {
+                    log_info!("Show window requested by tray");
+                    // Window is already shown since update is running
+                }
+                TrayMessage::StartOverlay => {
+                    log_info!("Start overlay requested by tray");
+                    if !self.overlay_running {
+                        self.start_overlay();
+                    }
+                }
+                TrayMessage::StopOverlay => {
+                    log_info!("Stop overlay requested by tray");
+                    if self.overlay_running {
+                        self.stop_overlay();
+                    }
+                }
+                TrayMessage::Exit => {
+                    log_info!("Exit requested by tray");
+                    self.graceful_exit();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+
         // Check for debounced strength restart (250ms after last change)
         if self.strength_changed && self.strength_last_change.elapsed() >= Duration::from_millis(250) {
             self.strength_changed = false;
@@ -466,10 +635,17 @@ impl eframe::App for ColorInterlacerApp {
 
 impl Drop for ColorInterlacerApp {
     fn drop(&mut self) {
-        // Terminate overlay process when GUI closes
-        if let Some(mut child) = self.overlay_process.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        // Only kill overlay if keep_running_in_tray is false
+        // (When true, overlay handle was already released in close handler)
+        if !self.config.get_keep_running_in_tray() {
+            if let Some(mut child) = self.overlay_process.take() {
+                log_info!("Terminating overlay process on GUI exit");
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        } else {
+            // Overlay was already released and transferred to tray
+            log_info!("GUI Drop: overlay was transferred to tray");
         }
     }
 }

@@ -7,7 +7,7 @@ mod window_flags;
 mod dcomp_overlay;
 
 use anyhow::Result;
-use color_interlacer_core::{Config, HueMapper, NoiseTexture, SpectrumPair};
+use color_interlacer_core::{Config, HueMapper, NoiseTexture, SpectrumPair, log_info, log_error};
 use std::sync::Arc;
 use parking_lot::RwLock;
 
@@ -20,17 +20,15 @@ pub struct OverlayState {
     pub frame_time_ms: f32,
 }
 
-// Simple print macro for overlay (no file logging)
-#[macro_export]
-macro_rules! print_debug {
-    ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        println!($($arg)*)
-    };
-}
-
 fn main() -> Result<()> {
     let config = Config::new()?;
+
+    // Initialize logger
+    let log_dir = config.app_data_dir.join("logs");
+    let app_config = config.load().unwrap_or_default();
+    color_interlacer_core::logger::init_logger(log_dir, "overlay", app_config.log_retention_count)?;
+
+    log_info!("=== Overlay Session Started ===");
 
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
@@ -71,17 +69,35 @@ fn main() -> Result<()> {
         i += 1;
     }
 
-    print_debug!("Monitor: {}, Spectrum: {}, Strength: {}",
-                monitor_index, spectrum_name, strength);
+    log_info!("Configuration: monitor={}, spectrum={}, noise={:?}, strength={}",
+             monitor_index, spectrum_name, noise_name, strength);
 
     // Load spectrum
     let spectrum_path = config.get_spectrum_path(&spectrum_name);
-    let spectrum_pair = SpectrumPair::load_from_file(spectrum_path)?;
+    let spectrum_pair = match SpectrumPair::load_from_file(spectrum_path) {
+        Ok(sp) => {
+            log_info!("Loaded spectrum: {}", spectrum_name);
+            sp
+        }
+        Err(e) => {
+            log_error!("Failed to load spectrum '{}': {}", spectrum_name, e);
+            return Err(e);
+        }
+    };
 
     // Load noise texture if specified
     let noise_texture = if let Some(ref name) = noise_name {
         let noise_path = config.get_noise_path(name);
-        Some(NoiseTexture::load_from_file(noise_path)?)
+        match NoiseTexture::load_from_file(noise_path) {
+            Ok(nt) => {
+                log_info!("Loaded noise texture: {}", name);
+                Some(nt)
+            }
+            Err(e) => {
+                log_error!("Failed to load noise texture '{}': {}", name, e);
+                None
+            }
+        }
     } else {
         None
     };
@@ -100,7 +116,13 @@ fn main() -> Result<()> {
     }));
 
     // Run DirectComposition overlay (like Xbox Game Bar)
-    print_debug!("Starting DirectComposition overlay...");
+    log_info!("Starting DirectComposition overlay...");
     let mut overlay = dcomp_overlay::DCompOverlay::new(state)?;
-    overlay.run_message_loop()
+    let result = overlay.run_message_loop();
+
+    // Finalize logs on exit
+    log_info!("Overlay shutting down...");
+    color_interlacer_core::logger::finalize_logs()?;
+
+    result
 }

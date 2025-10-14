@@ -1,0 +1,34 @@
+[package]
+name = "color-interlacer-tray"
+version.workspace = true
+edition.workspace = true
+description = "Color Interlacer Tray Service - System tray and process manager"
+authors.workspace = true
+
+[[bin]]
+name = "color-interlacer-tray"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+[dependencies]
+color-interlacer-core = { path = "../core" }
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+crossbeam-channel.workspace = true
+
+tray-icon = "0.18"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }

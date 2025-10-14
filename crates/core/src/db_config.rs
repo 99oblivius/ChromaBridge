@@ -30,6 +30,9 @@ struct ConfigCache {
     noise_texture: Option<String>,
     overlay_enabled: bool,
     run_at_startup: bool,
+    start_overlay_on_launch: bool,
+    keep_running_in_tray: bool,
+    advanced_settings_open: bool,
     debug_overlay: bool,
     log_retention_count: usize,
 }
@@ -43,6 +46,9 @@ impl Default for ConfigCache {
             noise_texture: None,
             overlay_enabled: false,
             run_at_startup: false,
+            start_overlay_on_launch: false,
+            keep_running_in_tray: true, // Default to keep running in tray
+            advanced_settings_open: false,
             debug_overlay: false,
             log_retention_count: 10,
         }
@@ -221,6 +227,21 @@ impl DbConfig {
             cache.run_at_startup = value == "true";
         }
 
+        if let Some(value) = get_setting("start_overlay_on_launch") {
+            cache.start_overlay_on_launch = value == "true";
+        }
+
+        if let Some(value) = get_setting("keep_running_in_tray") {
+            cache.keep_running_in_tray = value == "true";
+        } else if let Some(value) = get_setting("minimize_to_tray") {
+            // Legacy migration from old setting name
+            cache.keep_running_in_tray = value == "true";
+        }
+
+        if let Some(value) = get_setting("advanced_settings_open") {
+            cache.advanced_settings_open = value == "true";
+        }
+
         if let Some(value) = get_setting("debug_overlay") {
             cache.debug_overlay = value == "true";
         }
@@ -237,7 +258,7 @@ impl DbConfig {
         let conn = match Connection::open(&db_path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Failed to open database in write worker: {}", e);
+                crate::log_error!("Failed to open database in write worker: {}", e);
                 return;
             }
         };
@@ -258,7 +279,7 @@ impl DbConfig {
                         "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
                         params![key, value, now],
                     ) {
-                        eprintln!("Failed to write setting {}: {}", key, e);
+                        crate::log_error!("Failed to write setting {}: {}", key, e);
                     }
                 }
                 WriteCommand::Shutdown => {
@@ -322,6 +343,18 @@ impl DbConfig {
         self.cache.read().run_at_startup
     }
 
+    pub fn get_start_overlay_on_launch(&self) -> bool {
+        self.cache.read().start_overlay_on_launch
+    }
+
+    pub fn get_keep_running_in_tray(&self) -> bool {
+        self.cache.read().keep_running_in_tray
+    }
+
+    pub fn get_advanced_settings_open(&self) -> bool {
+        self.cache.read().advanced_settings_open
+    }
+
     pub fn get_debug_overlay(&self) -> bool {
         self.cache.read().debug_overlay
     }
@@ -379,6 +412,30 @@ impl DbConfig {
         self.cache.write().run_at_startup = value;
         let _ = self.write_sender.send(WriteCommand::UpdateSetting(
             "run_at_startup".to_string(),
+            value.to_string(),
+        ));
+    }
+
+    pub fn set_start_overlay_on_launch(&self, value: bool) {
+        self.cache.write().start_overlay_on_launch = value;
+        let _ = self.write_sender.send(WriteCommand::UpdateSetting(
+            "start_overlay_on_launch".to_string(),
+            value.to_string(),
+        ));
+    }
+
+    pub fn set_keep_running_in_tray(&self, value: bool) {
+        self.cache.write().keep_running_in_tray = value;
+        let _ = self.write_sender.send(WriteCommand::UpdateSetting(
+            "keep_running_in_tray".to_string(),
+            value.to_string(),
+        ));
+    }
+
+    pub fn set_advanced_settings_open(&self, value: bool) {
+        self.cache.write().advanced_settings_open = value;
+        let _ = self.write_sender.send(WriteCommand::UpdateSetting(
+            "advanced_settings_open".to_string(),
             value.to_string(),
         ));
     }

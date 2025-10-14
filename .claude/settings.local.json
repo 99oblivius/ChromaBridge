@@ -19,7 +19,9 @@
       "Read(//c/Users/Livia/AppData/Roaming/ColorInterlacer/logs/**)",
       "Bash(tasklist)",
       "Bash(findstr:*)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "WebSearch",
+      "mcp__ide__getDiagnostics"
     ],
     "deny": [],
     "ask": []
