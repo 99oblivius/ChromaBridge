@@ -25,7 +25,9 @@ struct App {
     exit_requested: Arc<AtomicBool>,
     command_tx: Sender<AppCommand>,
     gui_close_tx: parking_lot::Mutex<Option<Sender<()>>>,
+    gui_toggle_tx: parking_lot::Mutex<Option<Sender<()>>>,
     gui_ctx: Arc<parking_lot::Mutex<Option<egui::Context>>>,
+    wakeup: Arc<(parking_lot::Mutex<()>, parking_lot::Condvar)>,
 }
 
 impl App {
@@ -41,20 +43,45 @@ impl App {
             exit_requested: Arc::new(AtomicBool::new(false)),
             command_tx,
             gui_close_tx: parking_lot::Mutex::new(None),
+            gui_toggle_tx: parking_lot::Mutex::new(None),
             gui_ctx: Arc::new(parking_lot::Mutex::new(None)),
+            wakeup: Arc::new((parking_lot::Mutex::new(()), parking_lot::Condvar::new())),
         }, command_rx))
     }
 
     fn request_open_gui(&self) {
         if !self.gui_visible.load(Ordering::Acquire) {
             let _ = self.command_tx.try_send(AppCommand::OpenGui);
+            self.wakeup.1.notify_one();
         } else {
-            log_info!("GUI already open");
+            log_info!("GUI already open - bringing to front");
+            // Focus the existing GUI window
+            if let Some(ctx) = self.gui_ctx.lock().as_ref() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                ctx.request_repaint();
+            }
         }
     }
 
     fn request_toggle_overlay(&self) {
-        let _ = self.command_tx.try_send(AppCommand::ToggleOverlay);
+        // If GUI is open, send toggle signal directly to it for immediate response
+        if self.gui_visible.load(Ordering::Acquire) {
+            if let Some(toggle_tx) = self.gui_toggle_tx.lock().as_ref() {
+                let _ = toggle_tx.try_send(());
+            }
+
+            // Force GUI to repaint so it checks the toggle signal immediately
+            if let Some(ctx) = self.gui_ctx.lock().as_ref() {
+                ctx.request_repaint();
+            }
+
+            // Also send to command channel so main loop can process it when GUI closes
+            let _ = self.command_tx.try_send(AppCommand::ToggleOverlay);
+        } else {
+            // GUI not open, send to main loop
+            let _ = self.command_tx.try_send(AppCommand::ToggleOverlay);
+            self.wakeup.1.notify_one();
+        }
     }
 
     fn request_exit(&self) {
@@ -71,6 +98,7 @@ impl App {
         }
 
         let _ = self.command_tx.try_send(AppCommand::Exit);
+        self.wakeup.1.notify_one();
     }
 
     fn toggle_overlay(&self) {
@@ -166,7 +194,6 @@ fn run_app() -> Result<()> {
     log_info!("Tray icon created on main thread");
 
     let app_clone = Arc::clone(&app);
-    let gui_visible_for_click = Arc::clone(&app.gui_visible);
     let exit_requested_for_click = Arc::clone(&app.exit_requested);
     TrayIconEvent::set_event_handler(Some(move |event| {
         match event {
@@ -175,12 +202,8 @@ fn run_app() -> Result<()> {
                     if exit_requested_for_click.load(Ordering::Acquire) {
                         return;
                     }
-                    if !gui_visible_for_click.load(Ordering::Acquire) {
-                        log_info!("Tray icon clicked");
-                        app_clone.request_open_gui();
-                    } else {
-                        log_info!("Tray icon clicked but GUI already visible");
-                    }
+                    log_info!("Tray icon clicked");
+                    app_clone.request_open_gui();
                 }
             }
             _ => {}
@@ -188,19 +211,14 @@ fn run_app() -> Result<()> {
     }));
 
     let app_clone = Arc::clone(&app);
-    let gui_visible_for_menu = Arc::clone(&app.gui_visible);
     let exit_requested_for_menu = Arc::clone(&app.exit_requested);
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == open_settings_id {
             if exit_requested_for_menu.load(Ordering::Acquire) {
                 return;
             }
-            if !gui_visible_for_menu.load(Ordering::Acquire) {
-                log_info!("Open Settings clicked");
-                app_clone.request_open_gui();
-            } else {
-                log_info!("Open Settings clicked but GUI already visible");
-            }
+            log_info!("Open Settings clicked");
+            app_clone.request_open_gui();
         } else if event.id == overlay_id {
             let was_running = app_clone.overlay_manager.is_running();
             let state = if was_running { "OFF" } else { "ON" };
@@ -212,11 +230,12 @@ fn run_app() -> Result<()> {
         }
     }));
 
-    log_info!("Entering main GUI loop");
+    log_info!("Entering main event loop");
 
     use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, TranslateMessage, DispatchMessageW, MSG, PM_REMOVE, WM_QUIT};
 
     let mut last_tray_update = std::time::Instant::now();
+    let wakeup = Arc::clone(&app.wakeup);
 
     loop {
         unsafe {
@@ -231,8 +250,10 @@ fn run_app() -> Result<()> {
             }
         }
 
-        // Update tray state more frequently for better responsiveness
-        if last_tray_update.elapsed() >= std::time::Duration::from_millis(100) {
+        // Check if we should update tray (either timer elapsed or explicitly requested)
+        let should_update_tray = last_tray_update.elapsed() >= std::time::Duration::from_millis(100);
+
+        if should_update_tray {
             let tooltip = app.get_tooltip();
             tray_icon.set_tooltip(Some(&tooltip)).ok();
 
@@ -242,8 +263,11 @@ fn run_app() -> Result<()> {
             last_tray_update = std::time::Instant::now();
         }
 
-        match command_rx.recv_timeout(std::time::Duration::from_millis(10)) {
-            Ok(AppCommand::OpenGui) => {
+        // Process all pending commands (non-blocking)
+        let mut processed_toggle = false;
+        while let Ok(cmd) = command_rx.try_recv() {
+            match cmd {
+            AppCommand::OpenGui => {
                 // Check if exit was requested before opening GUI
                 if app.exit_requested.load(Ordering::Acquire) {
                     log_info!("Exit requested, ignoring GUI open request");
@@ -258,13 +282,21 @@ fn run_app() -> Result<()> {
 
                 log_info!("Opening GUI window");
 
+                // Clone all app fields we need upfront
                 let state = Arc::clone(&app.state);
                 let overlay_manager = Arc::clone(&app.overlay_manager);
                 let gui_visible = Arc::clone(&app.gui_visible);
+                let command_tx_for_requeue = app.command_tx.clone();
+                let gui_ctx_storage = Arc::clone(&app.gui_ctx);
+                let wakeup = Arc::clone(&app.wakeup);
 
                 // Create close signal channel
                 let (close_tx, close_rx) = bounded(1);
                 *app.gui_close_tx.lock() = Some(close_tx);
+
+                // Create toggle signal channel
+                let (toggle_tx, toggle_rx) = bounded(1);
+                *app.gui_toggle_tx.lock() = Some(toggle_tx);
 
                 let native_options = eframe::NativeOptions {
                     viewport: egui::ViewportBuilder::default()
@@ -276,19 +308,29 @@ fn run_app() -> Result<()> {
                     ..Default::default()
                 };
 
+                let overlay_manager_for_gui = Arc::clone(&overlay_manager);
                 let overlay_manager_for_toggle = Arc::clone(&overlay_manager);
                 let overlay_manager_for_restart = Arc::clone(&overlay_manager);
-
-                let gui_ctx_storage = Arc::clone(&app.gui_ctx);
+                let wakeup_for_toggle = Arc::clone(&wakeup);
+                let gui_ctx_storage_for_gui = Arc::clone(&gui_ctx_storage);
+                let state_for_gui = Arc::clone(&state);
+                let tray_icon_for_gui = tray_icon.clone();
+                let overlay_item_for_gui = overlay_item.clone();
 
                 let result = eframe::run_native(
                     "ChromaBridge",
                     native_options,
                     Box::new(move |_cc| {
-                        let mut settings_gui = gui::SettingsGui::new(state, gui_ctx_storage);
+                        let mut settings_gui = gui::SettingsGui::new(state_for_gui, overlay_manager_for_gui, gui_ctx_storage_for_gui);
+
+                        // Give GUI access to tray icon so it can update immediately
+                        settings_gui.set_tray_items(tray_icon_for_gui, overlay_item_for_gui);
 
                         // Set close signal receiver
                         settings_gui.set_close_receiver(close_rx);
+
+                        // Set toggle signal receiver (for tray menu)
+                        settings_gui.set_toggle_receiver(toggle_rx);
 
                         // Toggle callback for Start/Stop button
                         settings_gui.set_overlay_toggle_callback(move || {
@@ -296,6 +338,8 @@ fn run_app() -> Result<()> {
                             overlay_manager_for_toggle.toggle();
                             let state = if was_running { "OFF" } else { "ON" };
                             log_info!("Overlay toggled from GUI: {}", state);
+                            // Wake main loop to update tray immediately
+                            wakeup_for_toggle.1.notify_one();
                         });
 
                         // Restart callback for settings changes (only restarts if running)
@@ -315,30 +359,73 @@ fn run_app() -> Result<()> {
                     log_warn!("GUI window error: {:?}", e);
                 }
                 *app.gui_close_tx.lock() = None;
-                *app.gui_ctx.lock() = None;
+                *app.gui_toggle_tx.lock() = None;
+                *gui_ctx_storage.lock() = None;
                 gui_visible.store(false, Ordering::Release);
                 log_info!("GUI window closed");
 
+                // Drain any buffered OpenGui commands to prevent immediate reopening
+                let mut drained = 0;
+                let mut other_commands = Vec::new();
+                while let Ok(cmd) = command_rx.try_recv() {
+                    match cmd {
+                        AppCommand::OpenGui => {
+                            drained += 1;
+                        }
+                        // Save other commands to re-queue
+                        other => {
+                            other_commands.push(other);
+                        }
+                    }
+                }
+                // Re-queue non-OpenGui commands
+                for cmd in other_commands {
+                    let _ = command_tx_for_requeue.try_send(cmd);
+                }
+                if drained > 0 {
+                    log_info!("Drained {} buffered OpenGui commands", drained);
+                }
+
                 // Check if we should exit after GUI closes
-                let keep_in_tray = app.state.read(|s| s.keep_running_in_tray);
+                let keep_in_tray = state.read(|s| s.keep_running_in_tray);
                 if !keep_in_tray {
                     log_info!("Keep in tray disabled - exiting application");
                     return Ok(());
                 }
             }
-            Ok(AppCommand::ToggleOverlay) => {
+            AppCommand::ToggleOverlay => {
                 app.toggle_overlay();
+                processed_toggle = true;
             }
-            Ok(AppCommand::Exit) => {
+            AppCommand::Exit => {
                 log_info!("Exit command - shutting down application");
                 app.exit_requested.store(true, Ordering::Release);
                 return Ok(());
             }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                log_info!("Command channel closed");
-                break;
             }
+        }
+
+        // Update tray immediately if we processed a toggle command
+        if processed_toggle {
+            let tooltip = app.get_tooltip();
+            tray_icon.set_tooltip(Some(&tooltip)).ok();
+            let overlay_running = app.overlay_manager.is_running();
+            overlay_item.set_checked(overlay_running);
+            last_tray_update = std::time::Instant::now();
+        }
+
+        // Block on condvar until woken (100ms timeout for tray updates)
+        let mut guard = wakeup.0.lock();
+        let result = wakeup.1.wait_for(&mut guard, std::time::Duration::from_millis(100));
+
+        // If woken by notification (not timeout), update tray immediately
+        // This handles GUI button toggle which wakes us via condvar
+        if !result.timed_out() && !processed_toggle {
+            let tooltip = app.get_tooltip();
+            tray_icon.set_tooltip(Some(&tooltip)).ok();
+            let overlay_running = app.overlay_manager.is_running();
+            overlay_item.set_checked(overlay_running);
+            last_tray_update = std::time::Instant::now();
         }
     }
 

@@ -113,6 +113,10 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
 
 pub struct SettingsGui {
     state: Arc<StateManager>,
+    overlay_manager: Arc<crate::overlay::OverlayManager>,
+
+    tray_icon: Option<tray_icon::TrayIcon>,
+    overlay_menu_item: Option<tray_icon::menu::CheckMenuItem>,
 
     monitors: Vec<MonitorInfo>,
     selected_monitor: usize,
@@ -135,13 +139,14 @@ pub struct SettingsGui {
 
     first_frame: bool,
     close_receiver: Option<crossbeam_channel::Receiver<()>>,
+    toggle_receiver: Option<crossbeam_channel::Receiver<()>>,
     app_ctx_storage: Option<Arc<parking_lot::Mutex<Option<egui::Context>>>>,
     dragging: bool,
     icon_texture: Option<egui::TextureHandle>,
 }
 
 impl SettingsGui {
-    pub fn new(state: Arc<StateManager>, ctx_storage: Arc<parking_lot::Mutex<Option<egui::Context>>>) -> Self {
+    pub fn new(state: Arc<StateManager>, overlay_manager: Arc<crate::overlay::OverlayManager>, ctx_storage: Arc<parking_lot::Mutex<Option<egui::Context>>>) -> Self {
         use crate::log_info;
 
         log_info!("Initializing SettingsGui");
@@ -167,6 +172,9 @@ impl SettingsGui {
 
         Self {
             state,
+            overlay_manager,
+            tray_icon: None,
+            overlay_menu_item: None,
             monitors,
             selected_monitor,
             spectrum_files,
@@ -182,6 +190,7 @@ impl SettingsGui {
             overlay_restart_callback: None,
             first_frame: true,
             close_receiver: None,
+            toggle_receiver: None,
             app_ctx_storage: Some(ctx_storage),
             dragging: false,
             icon_texture: None,
@@ -190,6 +199,15 @@ impl SettingsGui {
 
     pub fn set_close_receiver(&mut self, receiver: crossbeam_channel::Receiver<()>) {
         self.close_receiver = Some(receiver);
+    }
+
+    pub fn set_toggle_receiver(&mut self, receiver: crossbeam_channel::Receiver<()>) {
+        self.toggle_receiver = Some(receiver);
+    }
+
+    pub fn set_tray_items(&mut self, tray_icon: tray_icon::TrayIcon, overlay_item: tray_icon::menu::CheckMenuItem) {
+        self.tray_icon = Some(tray_icon);
+        self.overlay_menu_item = Some(overlay_item);
     }
 
     pub fn set_overlay_toggle_callback<F>(&mut self, callback: F)
@@ -253,6 +271,25 @@ impl SettingsGui {
             callback();
         }
     }
+
+    fn update_tray_state(&self) {
+        if let (Some(ref tray_icon), Some(ref overlay_item)) = (&self.tray_icon, &self.overlay_menu_item) {
+            let overlay_running = self.overlay_manager.is_running();
+            overlay_item.set_checked(overlay_running);
+
+            let spectrum_name = self.state.read(|s| s.spectrum_name.clone());
+            let tooltip = if overlay_running {
+                if let Some(name) = spectrum_name {
+                    format!("ChromaBridge\nOverlay: {} (Active)", name)
+                } else {
+                    "ChromaBridge\nOverlay: Active".to_string()
+                }
+            } else {
+                "ChromaBridge\nOverlay: Inactive".to_string()
+            };
+            let _ = tray_icon.set_tooltip(Some(&tooltip));
+        }
+    }
 }
 
 impl eframe::App for SettingsGui {
@@ -270,6 +307,20 @@ impl eframe::App for SettingsGui {
                 log_info!("Close signal received - closing GUI window");
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
+            }
+        }
+
+        // Check for toggle signal from tray menu
+        if let Some(ref rx) = self.toggle_receiver {
+            if rx.try_recv().is_ok() {
+                log_info!("Toggle signal received from tray menu");
+                if let Some(ref callback) = self.overlay_toggle_callback {
+                    callback();
+                }
+                // Update tray state immediately
+                self.update_tray_state();
+                // Force repaint to update button text immediately
+                ctx.request_repaint();
             }
         }
 
@@ -361,7 +412,7 @@ impl eframe::App for SettingsGui {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(10.0);
 
-                let overlay_running = self.state.read(|s| s.overlay_enabled);
+                let overlay_running = self.overlay_manager.is_running();
 
                 ui.horizontal(|ui| {
                     let button_text = if overlay_running { "Stop Overlay" } else { "Start Overlay" };
@@ -370,6 +421,8 @@ impl eframe::App for SettingsGui {
                         if let Some(ref callback) = self.overlay_toggle_callback {
                             callback();
                         }
+                        // Update tray state immediately
+                        self.update_tray_state();
                     }
                 });
 
