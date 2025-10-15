@@ -34,6 +34,7 @@ pub struct OverlayManager {
     running: Arc<Mutex<bool>>,
     overlay_thread: Mutex<Option<thread::JoinHandle<()>>>,
     last_monitor: Mutex<Option<usize>>,
+    frame_stats: Arc<Mutex<Option<(f32, f32)>>>, // (fps, frame_time_ms)
 }
 
 impl OverlayManager {
@@ -43,11 +44,16 @@ impl OverlayManager {
             running: Arc::new(Mutex::new(false)),
             overlay_thread: Mutex::new(None),
             last_monitor: Mutex::new(None),
+            frame_stats: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn is_running(&self) -> bool {
         *self.running.lock()
+    }
+
+    pub fn get_frame_stats(&self) -> Option<(f32, f32)> {
+        *self.frame_stats.lock()
     }
 
     pub fn toggle(&self) {
@@ -113,6 +119,7 @@ impl OverlayManager {
         let hue_mapper = HueMapper::new(strength);
 
         let running_flag = Arc::clone(&self.running);
+        let frame_stats = Arc::clone(&self.frame_stats);
         *running = true;
         *self.last_monitor.lock() = Some(monitor_index);
 
@@ -142,7 +149,7 @@ impl OverlayManager {
 
                 let result = (|| -> Result<()> {
                     let mut overlay = DCompOverlay::new(overlay_state, monitor_info, monitor_index)?;
-                    overlay.run_message_loop(&running_flag)
+                    overlay.run_message_loop(&running_flag, &frame_stats)
                 })();
 
                 if let Err(e) = result {
@@ -180,6 +187,9 @@ impl OverlayManager {
         if let Some(handle) = self.overlay_thread.lock().take() {
             let _ = handle.join();
         }
+
+        // Clear frame stats
+        *self.frame_stats.lock() = None;
 
         let monitor_idx = self.last_monitor.lock().take();
         self.app_state.update(|s| {
@@ -530,12 +540,16 @@ impl DCompOverlay {
         Ok(swap_chain)
     }
 
-    fn run_message_loop(&mut self, running_flag: &Arc<Mutex<bool>>) -> Result<()> {
+    fn run_message_loop(&mut self, running_flag: &Arc<Mutex<bool>>, frame_stats: &Arc<Mutex<Option<(f32, f32)>>>) -> Result<()> {
         #[cfg(windows)]
         unsafe {
             let mut msg = MSG::default();
             let mut last_error_log = std::time::Instant::now();
             let mut error_count = 0u32;
+
+            // Frame timing tracking (render_time, total_time)
+            let mut frame_times: Vec<(f32, f32)> = Vec::with_capacity(60);
+            let mut last_stats_update = std::time::Instant::now();
 
             loop {
                 if !*running_flag.lock() {
@@ -554,13 +568,52 @@ impl DCompOverlay {
                     DispatchMessageW(&msg);
                 }
 
-                if let Err(e) = self.render_frame() {
+                // Track frame start time
+                let frame_start = std::time::Instant::now();
+
+                if let Err(e) = self.prepare_frame() {
                     error_count += 1;
 
                     if last_error_log.elapsed().as_secs() >= 1 {
                         log_error!("Render error (count: {}): {}", error_count, e);
                         last_error_log = std::time::Instant::now();
                     }
+                }
+
+                // Measure rendering time before Present (excludes VSync wait)
+                let render_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+
+                // Now call Present which will block on VSync
+                let _ = self.present_frame();
+
+                // Measure total frame time (including Present/VSync)
+                let total_frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+                frame_times.push((render_time_ms, total_frame_time_ms));
+
+                // Update stats every 100ms
+                if last_stats_update.elapsed().as_millis() >= 100 && !frame_times.is_empty() {
+                    // Calculate averages
+                    let (sum_render, sum_total): (f32, f32) = frame_times.iter()
+                        .fold((0.0, 0.0), |(r, t), &(render, total)| (r + render, t + total));
+                    let avg_render_time = sum_render / frame_times.len() as f32;
+                    let avg_total_time = sum_total / frame_times.len() as f32;
+
+                    // FPS from total frame time (including VSync)
+                    let fps = if avg_total_time > 0.0 {
+                        1000.0 / avg_total_time
+                    } else {
+                        0.0
+                    };
+
+                    // Update shared stats (fps from total, but show render time)
+                    *frame_stats.lock() = Some((fps, avg_render_time));
+
+                    // Keep only last 60 frames for rolling average
+                    if frame_times.len() > 60 {
+                        frame_times.drain(0..frame_times.len() - 60);
+                    }
+
+                    last_stats_update = std::time::Instant::now();
                 }
             }
 
@@ -572,7 +625,7 @@ impl DCompOverlay {
     }
 
     #[cfg(windows)]
-    unsafe fn render_frame(&mut self) -> Result<()> {
+    unsafe fn prepare_frame(&mut self) -> Result<()> {
         // Try to acquire a new frame from desktop duplication
         if let Some(ref mut duplicator) = self.desktop_duplication {
             if let Some(acquired_texture) = duplicator.acquire_next_frame(0)? {
@@ -708,8 +761,12 @@ impl DCompOverlay {
 
         self.d3d_context.Draw(6, 0);
 
-        self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
+        Ok(())
+    }
 
+    #[cfg(windows)]
+    unsafe fn present_frame(&mut self) -> Result<()> {
+        self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
         Ok(())
     }
 

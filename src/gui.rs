@@ -2,6 +2,7 @@ use crate::StateManager;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Instant;
+use std::path::Path;
 
 #[cfg(windows)]
 use windows::{
@@ -10,7 +11,105 @@ use windows::{
         EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
         DEVMODEW, ENUM_CURRENT_SETTINGS,
     },
+    Win32::System::Registry::{
+        RegOpenKeyExW, RegSetValueExW, RegDeleteValueW, RegCloseKey,
+        HKEY_CURRENT_USER, HKEY, KEY_READ, KEY_WRITE, REG_VALUE_TYPE,
+    },
+    Win32::Foundation::ERROR_FILE_NOT_FOUND,
 };
+
+#[cfg(windows)]
+fn check_startup_registry_exists() -> Result<bool> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::RegQueryValueExW;
+
+    unsafe {
+        let subkey = HSTRING::from("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        let value_name = HSTRING::from("ChromaBridge");
+        let mut hkey = HKEY::default();
+
+        let open_result = RegOpenKeyExW(HKEY_CURRENT_USER, &subkey, None, KEY_READ, &mut hkey);
+
+        if open_result == ERROR_FILE_NOT_FOUND {
+            return Ok(false);
+        }
+
+        if open_result.is_err() {
+            return Err(anyhow::anyhow!("Failed to open registry key: {:?}", open_result));
+        }
+
+        let mut buffer = [0u16; 512];
+        let mut buffer_size = (buffer.len() * 2) as u32;
+        let mut value_type = REG_VALUE_TYPE::default();
+
+        let query_result = RegQueryValueExW(
+            hkey,
+            &value_name,
+            None,
+            Some(&mut value_type),
+            Some(buffer.as_mut_ptr() as *mut u8),
+            Some(&mut buffer_size),
+        );
+
+        let _ = RegCloseKey(hkey);
+        Ok(query_result.is_ok())
+    }
+}
+
+#[cfg(windows)]
+fn set_startup_registry(enabled: bool, exe_path: &Path) -> Result<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::REG_SZ;
+
+    unsafe {
+        let subkey = HSTRING::from("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        let value_name = HSTRING::from("ChromaBridge");
+        let mut hkey = HKEY::default();
+
+        let open_result = RegOpenKeyExW(HKEY_CURRENT_USER, &subkey, None, KEY_WRITE, &mut hkey);
+
+        if open_result.is_err() {
+            return Err(anyhow::anyhow!("Failed to open registry key for write: {:?}", open_result));
+        }
+
+        let result = if enabled {
+            let path_str = exe_path.to_string_lossy();
+            let path_wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+            let bytes: &[u8] = std::slice::from_raw_parts(
+                path_wide.as_ptr() as *const u8,
+                path_wide.len() * 2
+            );
+
+            RegSetValueExW(
+                hkey,
+                &value_name,
+                None,
+                REG_SZ,
+                Some(bytes),
+            )
+        } else {
+            RegDeleteValueW(hkey, &value_name)
+        };
+
+        let _ = RegCloseKey(hkey);
+
+        if result.is_err() {
+            return Err(anyhow::anyhow!("Failed to set/delete registry value: {:?}", result));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn check_startup_registry_exists() -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(not(windows))]
+fn set_startup_registry(_enabled: bool, _exe_path: &Path) -> Result<()> {
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct MonitorInfo {
@@ -169,6 +268,11 @@ impl SettingsGui {
 
         let noise_files = state.list_noise_files().unwrap_or_default();
         log_info!("Loaded {} noise textures", noise_files.len());
+
+        // Sync startup registry with actual state - registry is source of truth
+        let registry_enabled = check_startup_registry_exists().unwrap_or(false);
+        state.update(|s| s.run_at_startup = registry_enabled);
+        log_info!("Startup registry check: {}", registry_enabled);
 
         Self {
             state,
@@ -424,6 +528,14 @@ impl eframe::App for SettingsGui {
                         // Update tray state immediately
                         self.update_tray_state();
                     }
+
+                    // Display FPS and frame time when overlay is running
+                    if overlay_running {
+                        if let Some((fps, frame_time_ms)) = self.overlay_manager.get_frame_stats() {
+                            ui.add_space(10.0);
+                            ui.label(format!("{:.1} FPS | {:.2}ms", fps, frame_time_ms));
+                        }
+                    }
                 });
 
                 ui.add_space(20.0);
@@ -541,11 +653,25 @@ impl eframe::App for SettingsGui {
 
                         ui.label("System Options:");
                         let mut run_at_startup = self.state.read(|s| s.run_at_startup);
-                        if ui.checkbox(&mut run_at_startup, "Run at Windows startup")
-                            .on_hover_text("Places a shortcut in:\n%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup")
-                            .changed()
-                        {
-                            self.state.update(|s| s.run_at_startup = run_at_startup);
+                        if ui.checkbox(&mut run_at_startup, "Run at Windows startup").changed() {
+                            // Get exe path
+                            if let Ok(exe_path) = std::env::current_exe() {
+                                match set_startup_registry(run_at_startup, &exe_path) {
+                                    Ok(_) => {
+                                        self.state.update(|s| s.run_at_startup = run_at_startup);
+                                        self.status_message = Some(format!(
+                                            "Startup: {}",
+                                            if run_at_startup { "Enabled" } else { "Disabled" }
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        self.status_message = Some(format!("Failed to update startup: {}", e));
+                                        // Revert checkbox by not updating state
+                                    }
+                                }
+                            } else {
+                                self.status_message = Some("Failed to get exe path".to_string());
+                            }
                         }
 
                         let mut open_gui_on_launch = self.state.read(|s| s.open_gui_on_launch);
