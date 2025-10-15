@@ -1,7 +1,7 @@
 #[cfg(windows)]
 fn main() {
     let mut res = winres::WindowsResource::new();
-    res.set_icon("../assets/icons/icon.ico");
+    res.set_icon("icons/icon.ico");
     res.set("ProductName", "ChromaBridge");
     res.set("FileDescription", "ChromaBridge - Color Accessibility Tool");
     res.set("LegalCopyright", "© 2025 ChromaBridge Contributors");

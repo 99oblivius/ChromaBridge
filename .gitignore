@@ -28,7 +28,13 @@ Thumbs.db
 *.exe
 !installer/*.exe
 
-# Debug outputs
+# Debug outputs (but allow assets and icons)
 *.png
+!icons/*.png
+!assets/**/*.png
 *.json
+!assets/**/*.json
 !installer/*.json
+
+# Development assets (track in git, excluded from installer automatically)
+# .blend files in icons/ are source files only
