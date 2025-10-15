@@ -21,6 +21,18 @@ pub struct AppState {
     pub keep_running_in_tray: bool,
     pub debug_overlay: bool,
     pub log_retention_count: usize,
+
+    // New fields for improved state management
+    #[serde(default = "default_open_gui_on_launch")]
+    pub open_gui_on_launch: bool,
+    #[serde(default)]
+    pub show_advanced_settings: bool,
+    #[serde(default)]
+    pub last_overlay_enabled: bool,
+}
+
+fn default_open_gui_on_launch() -> bool {
+    true
 }
 
 impl Default for AppState {
@@ -36,6 +48,11 @@ impl Default for AppState {
             keep_running_in_tray: true,
             debug_overlay: false,
             log_retention_count: 10,
+
+            // New field defaults
+            open_gui_on_launch: true,
+            show_advanced_settings: false,
+            last_overlay_enabled: false,
         }
     }
 }
