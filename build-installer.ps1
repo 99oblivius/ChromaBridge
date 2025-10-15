@@ -1,19 +1,30 @@
 #!/usr/bin/env pwsh
-# PowerShell build script for ChromaBridge installer
+# Build ChromaBridge Installer
+# Extracts version from Cargo.toml and passes it to NSIS
 
-Write-Host "Building ChromaBridge..." -ForegroundColor Cyan
+$ErrorActionPreference = "Stop"
 
-# Build release binary
+# Extract version from Cargo.toml
+$cargoToml = Get-Content "Cargo.toml" -Raw
+if ($cargoToml -match 'version\s*=\s*"([^"]+)"') {
+    $cargoVersion = $matches[1]
+    # Strip "0." prefix for display (0.2025.15 -> 2025.15)
+    $version = $cargoVersion -replace '^0\.', ''
+    Write-Host "Building installer for version: $version (Cargo: $cargoVersion)" -ForegroundColor Cyan
+} else {
+    Write-Error "Could not find version in Cargo.toml"
+    exit 1
+}
+
+# Build release binary first
 Write-Host "`nBuilding release binary..." -ForegroundColor Yellow
 cargo build --release
-
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Build failed!" -ForegroundColor Red
     exit $LASTEXITCODE
 }
 
 Write-Host "Build successful!" -ForegroundColor Green
-Write-Host ""
 
 # Find NSIS
 $makensis = $null
@@ -44,13 +55,16 @@ if (-not $makensis) {
     exit 1
 }
 
-Write-Host "Creating installer using: $makensis" -ForegroundColor Yellow
-& $makensis "installer\installer.nsi"
+# Build installer with version
+Write-Host "`nCreating installer using: $makensis" -ForegroundColor Yellow
+Push-Location installer
+& $makensis "/DVERSION=$version" installer.nsi
+Pop-Location
 
-if ($LASTEXITCODE -ne 0) {
+if ($LASTEXITCODE -eq 0) {
+    Write-Host ""
+    Write-Host "Installer created successfully: target\ChromaBridge-Setup-$version.exe" -ForegroundColor Green
+} else {
     Write-Host "Installer creation failed!" -ForegroundColor Red
     exit $LASTEXITCODE
 }
-
-Write-Host ""
-Write-Host "Installer created successfully at: target\ChromaBridge-Setup.exe" -ForegroundColor Green

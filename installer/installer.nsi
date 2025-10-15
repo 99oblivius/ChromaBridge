@@ -8,7 +8,7 @@
 !endif
 !define COPYRIGHT "© 2025"
 !define DESCRIPTION "Ultra-fast color blind assistance overlay"
-!define INSTALLER_NAME "ChromaBridge-Setup.exe"
+!define INSTALLER_NAME "ChromaBridge-Setup-${VERSION}.exe"
 !define APP_EXE "chromabridge.exe"
 !define INSTALL_DIR "$LOCALAPPDATA\${APP_NAME}"
 
