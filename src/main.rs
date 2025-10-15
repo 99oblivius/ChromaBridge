@@ -75,8 +75,8 @@ impl App {
                 ctx.request_repaint();
             }
 
-            // Also send to command channel so main loop can process it when GUI closes
-            let _ = self.command_tx.try_send(AppCommand::ToggleOverlay);
+            // DO NOT send to command channel - GUI handles it immediately
+            // Sending to command channel causes buffered commands to re-toggle overlay when GUI closes
         } else {
             // GUI not open, send to main loop
             let _ = self.command_tx.try_send(AppCommand::ToggleOverlay);
