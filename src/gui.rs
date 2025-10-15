@@ -130,12 +130,23 @@ pub struct SettingsGui {
     show_advanced: bool,
     status_message: Option<String>,
 
-    overlay_callback: Option<Box<dyn Fn() + Send>>,
+    overlay_toggle_callback: Option<Box<dyn Fn() + Send>>,
+    overlay_restart_callback: Option<Box<dyn Fn() + Send>>,
+
+    first_frame: bool,
+    close_receiver: Option<crossbeam_channel::Receiver<()>>,
+    app_ctx_storage: Option<Arc<parking_lot::Mutex<Option<egui::Context>>>>,
+    dragging: bool,
+    icon_texture: Option<egui::TextureHandle>,
 }
 
 impl SettingsGui {
-    pub fn new(state: Arc<StateManager>) -> Self {
+    pub fn new(state: Arc<StateManager>, ctx_storage: Arc<parking_lot::Mutex<Option<egui::Context>>>) -> Self {
+        use crate::log_info;
+
+        log_info!("Initializing SettingsGui");
         let monitors = enumerate_monitors().unwrap_or_default();
+        log_info!("Found {} monitors", monitors.len());
 
         let (selected_monitor, selected_spectrum, selected_noise, strength, show_advanced) = state.read(|s| {
             let monitor = s.last_monitor.unwrap_or(0).min(monitors.len().saturating_sub(1));
@@ -145,11 +156,14 @@ impl SettingsGui {
             let noise = s.noise_texture.as_ref().and_then(|name| {
                 state.list_noise_files().ok()?.into_iter().position(|n| n == *name)
             });
-            (monitor, spectrum, noise, s.strength, false)
+            (monitor, spectrum, noise, s.strength, s.show_advanced_settings)
         });
 
         let spectrum_files = state.list_spectrum_files().unwrap_or_default();
+        log_info!("Loaded {} spectrum files", spectrum_files.len());
+
         let noise_files = state.list_noise_files().unwrap_or_default();
+        log_info!("Loaded {} noise textures", noise_files.len());
 
         Self {
             state,
@@ -164,15 +178,32 @@ impl SettingsGui {
             strength_last_change: Instant::now(),
             show_advanced,
             status_message: None,
-            overlay_callback: None,
+            overlay_toggle_callback: None,
+            overlay_restart_callback: None,
+            first_frame: true,
+            close_receiver: None,
+            app_ctx_storage: Some(ctx_storage),
+            dragging: false,
+            icon_texture: None,
         }
     }
 
-    pub fn set_overlay_callback<F>(&mut self, callback: F)
+    pub fn set_close_receiver(&mut self, receiver: crossbeam_channel::Receiver<()>) {
+        self.close_receiver = Some(receiver);
+    }
+
+    pub fn set_overlay_toggle_callback<F>(&mut self, callback: F)
     where
         F: Fn() + Send + 'static,
     {
-        self.overlay_callback = Some(Box::new(callback));
+        self.overlay_toggle_callback = Some(Box::new(callback));
+    }
+
+    pub fn set_overlay_restart_callback<F>(&mut self, callback: F)
+    where
+        F: Fn() + Send + 'static,
+    {
+        self.overlay_restart_callback = Some(Box::new(callback));
     }
 
     fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
@@ -218,7 +249,7 @@ impl SettingsGui {
     }
 
     fn restart_overlay_if_needed(&mut self) {
-        if let Some(ref callback) = self.overlay_callback {
+        if let Some(ref callback) = self.overlay_restart_callback {
             callback();
         }
     }
@@ -226,10 +257,108 @@ impl SettingsGui {
 
 impl eframe::App for SettingsGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        use crate::log_info;
+
+        // Disable text selection globally
+        ctx.style_mut(|style| {
+            style.interaction.selectable_labels = false;
+        });
+
+        // Check for close signal from main thread (for immediate exit)
+        if let Some(ref rx) = self.close_receiver {
+            if rx.try_recv().is_ok() {
+                log_info!("Close signal received - closing GUI window");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+        }
+
+        // Focus window on first frame to bring it to front
+        if self.first_frame {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+
+            // Store context so main thread can force repaints
+            if let Some(ref storage) = self.app_ctx_storage {
+                *storage.lock() = Some(ctx.clone());
+                log_info!("GUI context stored for exit signaling");
+            }
+
+            // Load icon on first frame
+            if let Ok(icon_path) = std::env::current_exe() {
+                if let Some(parent) = icon_path.parent() {
+                    let icon_file = parent.join("icon.ico");
+                    if icon_file.exists() {
+                        if let Ok(img) = image::open(&icon_file) {
+                            let rgba = img.to_rgba8();
+                            let size = [rgba.width() as usize, rgba.height() as usize];
+                            let pixels = rgba.as_flat_samples();
+                            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+                            self.icon_texture = Some(ctx.load_texture("app_icon", color_image, Default::default()));
+                        }
+                    }
+                }
+            }
+
+            self.first_frame = false;
+        }
+
+        let title_bar_height = 32.0;
+        let close_button_size = egui::vec2(46.0, title_bar_height);
+
+        egui::TopBottomPanel::top("title_bar").exact_height(title_bar_height).show(ctx, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.add_space(8.0);
+
+                // App icon
+                if let Some(ref texture) = self.icon_texture {
+                    let icon_size = 20.0;
+                    ui.add(egui::Image::new(texture).max_size(egui::vec2(icon_size, icon_size)));
+                    ui.add_space(8.0);
+                }
+
+                let title_response = ui.interact(
+                    egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width() - close_button_size.x, title_bar_height)),
+                    ui.id().with("title_bar_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+
+                if title_response.is_pointer_button_down_on() {
+                    if !self.dragging {
+                        log_info!("Title bar drag started");
+                        self.dragging = true;
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                } else if self.dragging {
+                    self.dragging = false;
+                }
+
+                ui.label(
+                    egui::RichText::new("ChromaBridge - Settings")
+                        .size(14.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(220, 220, 220))
+                );
+
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("v0.1.0").size(10.0).color(egui::Color32::from_rgb(140, 140, 140)));
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let close_response = ui.add_sized(
+                        close_button_size,
+                        egui::Button::new(egui::RichText::new("X").size(16.0))
+                            .frame(false)
+                    );
+                    if close_response.clicked() {
+                        log_info!("Close button clicked");
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            });
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("ChromaBridge");
-                ui.add_space(15.0);
+                ui.add_space(10.0);
 
                 let overlay_running = self.state.read(|s| s.overlay_enabled);
 
@@ -237,7 +366,7 @@ impl eframe::App for SettingsGui {
                     let button_text = if overlay_running { "Stop Overlay" } else { "Start Overlay" };
                     let button = egui::Button::new(button_text).min_size(egui::vec2(120.0, 30.0));
                     if ui.add(button).clicked() {
-                        if let Some(ref callback) = self.overlay_callback {
+                        if let Some(ref callback) = self.overlay_toggle_callback {
                             callback();
                         }
                     }
@@ -358,13 +487,16 @@ impl eframe::App for SettingsGui {
 
                         ui.label("System Options:");
                         let mut run_at_startup = self.state.read(|s| s.run_at_startup);
-                        if ui.checkbox(&mut run_at_startup, "Run at Windows startup").changed() {
+                        if ui.checkbox(&mut run_at_startup, "Run at Windows startup")
+                            .on_hover_text("Places a shortcut in:\n%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup")
+                            .changed()
+                        {
                             self.state.update(|s| s.run_at_startup = run_at_startup);
                         }
 
-                        let mut start_overlay_on_launch = self.state.read(|s| s.start_overlay_on_launch);
-                        if ui.checkbox(&mut start_overlay_on_launch, "Start overlay on launch").changed() {
-                            self.state.update(|s| s.start_overlay_on_launch = start_overlay_on_launch);
+                        let mut open_gui_on_launch = self.state.read(|s| s.open_gui_on_launch);
+                        if ui.checkbox(&mut open_gui_on_launch, "Open settings on launch").changed() {
+                            self.state.update(|s| s.open_gui_on_launch = open_gui_on_launch);
                         }
 
                         let mut keep_running_in_tray = self.state.read(|s| s.keep_running_in_tray);
@@ -378,6 +510,7 @@ impl eframe::App for SettingsGui {
                 let is_open = header_response.openness > 0.5;
                 if is_open != self.show_advanced {
                     self.show_advanced = is_open;
+                    self.state.update(|s| s.show_advanced_settings = is_open);
                 }
 
                 ui.add_space(15.0);
