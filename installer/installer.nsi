@@ -4,7 +4,7 @@
 !define APP_NAME "ChromaBridge"
 !define COMP_NAME "ChromaBridge"
 !ifndef VERSION
-  !define VERSION "0.0.0"
+  !define VERSION "0.0"
 !endif
 !define COPYRIGHT "© 2025"
 !define DESCRIPTION "Ultra-fast color blind assistance overlay"
@@ -15,7 +15,8 @@
 ; Request user level (not admin)
 RequestExecutionLevel user
 
-VIProductVersion "${VERSION}.0"
+; VERSION comes as "2025.15", need to append for VIProductVersion (requires X.Y.Z.W)
+VIProductVersion "${VERSION}.0.0"
 VIAddVersionKey "ProductName" "${APP_NAME}"
 VIAddVersionKey "CompanyName" "${COMP_NAME}"
 VIAddVersionKey "LegalCopyright" "${COPYRIGHT}"

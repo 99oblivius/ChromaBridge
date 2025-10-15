@@ -6,8 +6,10 @@ $ErrorActionPreference = "Stop"
 # Extract version from Cargo.toml
 $cargoToml = Get-Content "Cargo.toml" -Raw
 if ($cargoToml -match 'version\s*=\s*"([^"]+)"') {
-    $version = $matches[1]
-    Write-Host "Building installer for version: $version"
+    $cargoVersion = $matches[1]
+    # Strip "0." prefix for display (0.2025.15 -> 2025.15)
+    $version = $cargoVersion -replace '^0\.', ''
+    Write-Host "Building installer for version: $version (Cargo: $cargoVersion)"
 } else {
     Write-Error "Could not find version in Cargo.toml"
     exit 1
