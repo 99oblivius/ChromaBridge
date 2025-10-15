@@ -235,8 +235,6 @@ fn run_app() -> Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, TranslateMessage, DispatchMessageW, MSG, PM_REMOVE, WM_QUIT};
 
     let mut last_tray_update = std::time::Instant::now();
-    let mut last_overlay_state = (false, None); // (overlay_running, monitor_index)
-    let plain_icon = icon.clone();
     let wakeup = Arc::clone(&app.wakeup);
 
     loop {
@@ -260,28 +258,6 @@ fn run_app() -> Result<()> {
             tray_icon.set_tooltip(Some(&tooltip)).ok();
 
             let overlay_running = app.overlay_manager.is_running();
-            let monitor_idx = if overlay_running {
-                app.state.read(|s| s.last_monitor)
-            } else {
-                None
-            };
-
-            let current_state = (overlay_running, monitor_idx);
-            if current_state != last_overlay_state {
-                // Icon state changed - update icon
-                if overlay_running {
-                    if let Some(idx) = monitor_idx {
-                        if let Ok(badged_icon) = generate_monitor_badge_icon(idx) {
-                            let _ = tray_icon.set_icon(Some(badged_icon));
-                        }
-                    }
-                } else {
-                    // Restore plain icon
-                    let _ = tray_icon.set_icon(Some(plain_icon.clone()));
-                }
-                last_overlay_state = current_state;
-            }
-
             overlay_item.set_checked(overlay_running);
 
             last_tray_update = std::time::Instant::now();
@@ -434,27 +410,6 @@ fn run_app() -> Result<()> {
             let tooltip = app.get_tooltip();
             tray_icon.set_tooltip(Some(&tooltip)).ok();
             let overlay_running = app.overlay_manager.is_running();
-
-            // Update icon
-            let monitor_idx = if overlay_running {
-                app.state.read(|s| s.last_monitor)
-            } else {
-                None
-            };
-            let current_state = (overlay_running, monitor_idx);
-            if current_state != last_overlay_state {
-                if overlay_running {
-                    if let Some(idx) = monitor_idx {
-                        if let Ok(badged_icon) = generate_monitor_badge_icon(idx) {
-                            let _ = tray_icon.set_icon(Some(badged_icon));
-                        }
-                    }
-                } else {
-                    let _ = tray_icon.set_icon(Some(plain_icon.clone()));
-                }
-                last_overlay_state = current_state;
-            }
-
             overlay_item.set_checked(overlay_running);
             last_tray_update = std::time::Instant::now();
         }
@@ -469,32 +424,12 @@ fn run_app() -> Result<()> {
             let tooltip = app.get_tooltip();
             tray_icon.set_tooltip(Some(&tooltip)).ok();
             let overlay_running = app.overlay_manager.is_running();
-
-            // Update icon
-            let monitor_idx = if overlay_running {
-                app.state.read(|s| s.last_monitor)
-            } else {
-                None
-            };
-            let current_state = (overlay_running, monitor_idx);
-            if current_state != last_overlay_state {
-                if overlay_running {
-                    if let Some(idx) = monitor_idx {
-                        if let Ok(badged_icon) = generate_monitor_badge_icon(idx) {
-                            let _ = tray_icon.set_icon(Some(badged_icon));
-                        }
-                    }
-                } else {
-                    let _ = tray_icon.set_icon(Some(plain_icon.clone()));
-                }
-                last_overlay_state = current_state;
-            }
-
             overlay_item.set_checked(overlay_running);
             last_tray_update = std::time::Instant::now();
         }
     }
 
+    #[allow(unreachable_code)]
     Ok(())
 }
 
@@ -528,118 +463,6 @@ fn load_icon() -> Result<Icon> {
 
     Icon::from_rgba(icon_rgba, 16, 16)
         .map_err(|e| anyhow::anyhow!("Failed to create fallback icon: {}", e))
-}
-
-fn generate_monitor_badge_icon(monitor_index: usize) -> Result<Icon> {
-    use image::{DynamicImage, Rgba, RgbaImage};
-
-    // Load base icon
-    let icon_path = std::env::current_exe()?
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Failed to get parent directory"))?
-        .join("icon.ico");
-
-    let img = if icon_path.exists() {
-        image::open(&icon_path)
-            .unwrap_or_else(|_| DynamicImage::ImageRgba8(RgbaImage::from_pixel(32, 32, Rgba([100, 150, 255, 255]))))
-    } else {
-        DynamicImage::ImageRgba8(RgbaImage::from_pixel(32, 32, Rgba([100, 150, 255, 255])))
-    };
-
-    let mut rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
-
-    // Monitor number to display (1-indexed)
-    let number = (monitor_index + 1) as u32;
-
-    // Calculate size: 90% of icon height, centered
-    let digit_height = (height as f32 * 0.9) as u32;
-    let digit_width = digit_height * 6 / 10; // 0.6 aspect ratio
-
-    let start_x = (width - digit_width) / 2;
-    let start_y = (height - digit_height) / 2;
-
-    // Draw simple block-style digit
-    draw_digit_simple(&mut rgba, number, start_x, start_y, digit_width, digit_height);
-
-    let icon_data = rgba.into_raw();
-    Icon::from_rgba(icon_data, width, height)
-        .map_err(|e| anyhow::anyhow!("Failed to create badged icon: {}", e))
-}
-
-fn draw_digit_simple(img: &mut image::RgbaImage, digit: u32, x: u32, y: u32, w: u32, h: u32) {
-    use image::Rgba;
-
-    let white = Rgba([255, 255, 255, 255]);
-    let black = Rgba([0, 0, 0, 200]); // Semi-transparent black for outline
-
-    // Helper to draw filled rectangle
-    let fill_rect = |img: &mut image::RgbaImage, x1: u32, y1: u32, x2: u32, y2: u32, color: Rgba<u8>| {
-        for py in y1..=y2.min(img.height().saturating_sub(1)) {
-            for px in x1..=x2.min(img.width().saturating_sub(1)) {
-                img.put_pixel(px, py, color);
-            }
-        }
-    };
-
-    // Draw with black outline for visibility
-    let outline = 1;
-
-    // Simplified digit bitmaps (use simple geometric shapes)
-    let bar_h = h / 6;
-    let bar_w = w.saturating_sub(4);
-
-    match digit {
-        1 => {
-            // Vertical bar in center-right
-            fill_rect(img, x + w/2 - 1, y, x + w/2 + 3, y + h, black);
-            fill_rect(img, x + w/2, y, x + w/2 + 2, y + h, white);
-        }
-        2 => {
-            // Top bar
-            fill_rect(img, x - outline, y - outline, x + bar_w + outline, y + bar_h + outline, black);
-            fill_rect(img, x, y, x + bar_w, y + bar_h, white);
-            // Middle bar
-            fill_rect(img, x - outline, y + h/2 - bar_h/2 - outline, x + bar_w + outline, y + h/2 + bar_h/2 + outline, black);
-            fill_rect(img, x, y + h/2 - bar_h/2, x + bar_w, y + h/2 + bar_h/2, white);
-            // Bottom bar
-            fill_rect(img, x - outline, y + h - bar_h - outline, x + bar_w + outline, y + h + outline, black);
-            fill_rect(img, x, y + h - bar_h, x + bar_w, y + h, white);
-        }
-        3 => {
-            // Three horizontal bars (top, middle, bottom)
-            fill_rect(img, x - outline, y - outline, x + bar_w + outline, y + bar_h + outline, black);
-            fill_rect(img, x, y, x + bar_w, y + bar_h, white);
-
-            fill_rect(img, x - outline, y + h/2 - bar_h/2 - outline, x + bar_w + outline, y + h/2 + bar_h/2 + outline, black);
-            fill_rect(img, x, y + h/2 - bar_h/2, x + bar_w, y + h/2 + bar_h/2, white);
-
-            fill_rect(img, x - outline, y + h - bar_h - outline, x + bar_w + outline, y + h + outline, black);
-            fill_rect(img, x, y + h - bar_h, x + bar_w, y + h, white);
-        }
-        _ => {
-            // For other digits (0, 4-9), draw the digit as text-like shape
-            // Simplified: just draw a filled rounded shape with the number
-            let center_x = x + w / 2;
-            let center_y = y + h / 2;
-            let radius = w.min(h) / 2;
-
-            for py in 0..img.height() {
-                for px in 0..img.width() {
-                    let dx = px as i32 - center_x as i32;
-                    let dy = py as i32 - center_y as i32;
-                    let dist_sq = dx * dx + dy * dy;
-                    let r_sq = (radius as i32) * (radius as i32);
-
-                    if dist_sq < r_sq {
-                        img.put_pixel(px, py, white);
-                    } else if dist_sq < (r_sq + radius as i32 * 2) {
-                        img.put_pixel(px, py, black);
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn load_window_icon() -> egui::IconData {

@@ -29,6 +29,20 @@ pub struct AppState {
     pub show_advanced_settings: bool,
     #[serde(default)]
     pub last_overlay_enabled: bool,
+
+    // Developer options
+    #[serde(default = "default_vsync_enabled")]
+    pub vsync_enabled: bool,
+    #[serde(default = "default_target_fps")]
+    pub target_fps: Option<f32>,
+}
+
+fn default_vsync_enabled() -> bool {
+    true
+}
+
+fn default_target_fps() -> Option<f32> {
+    None // Default to no FPS cap
 }
 
 fn default_open_gui_on_launch() -> bool {
@@ -53,6 +67,10 @@ impl Default for AppState {
             open_gui_on_launch: true,
             show_advanced_settings: false,
             last_overlay_enabled: false,
+
+            // Developer option defaults
+            vsync_enabled: true,
+            target_fps: None,
         }
     }
 }

@@ -231,7 +231,10 @@ pub struct SettingsGui {
     strength_last_change: Instant,
 
     show_advanced: bool,
+    show_developer: bool,
     status_message: Option<String>,
+
+    icon_click_times: Vec<Instant>,
 
     overlay_toggle_callback: Option<Box<dyn Fn() + Send>>,
     overlay_restart_callback: Option<Box<dyn Fn() + Send>>,
@@ -252,7 +255,7 @@ impl SettingsGui {
         let monitors = enumerate_monitors().unwrap_or_default();
         log_info!("Found {} monitors", monitors.len());
 
-        let (selected_monitor, selected_spectrum, selected_noise, strength, show_advanced) = state.read(|s| {
+        let (selected_monitor, selected_spectrum, selected_noise, strength, show_advanced, show_developer) = state.read(|s| {
             let monitor = s.last_monitor.unwrap_or(0).min(monitors.len().saturating_sub(1));
             let spectrum = s.spectrum_name.as_ref().and_then(|name| {
                 state.list_spectrum_files().ok()?.into_iter().position(|s| s == *name)
@@ -260,7 +263,7 @@ impl SettingsGui {
             let noise = s.noise_texture.as_ref().and_then(|name| {
                 state.list_noise_files().ok()?.into_iter().position(|n| n == *name)
             });
-            (monitor, spectrum, noise, s.strength, s.show_advanced_settings)
+            (monitor, spectrum, noise, s.strength, s.show_advanced_settings, false)
         });
 
         let spectrum_files = state.list_spectrum_files().unwrap_or_default();
@@ -289,7 +292,9 @@ impl SettingsGui {
             strength_changed: false,
             strength_last_change: Instant::now(),
             show_advanced,
+            show_developer,
             status_message: None,
+            icon_click_times: Vec::new(),
             overlay_toggle_callback: None,
             overlay_restart_callback: None,
             first_frame: true,
@@ -464,10 +469,30 @@ impl eframe::App for SettingsGui {
             ui.horizontal_centered(|ui| {
                 ui.add_space(8.0);
 
-                // App icon
+                // App icon (clickable for developer mode)
                 if let Some(ref texture) = self.icon_texture {
                     let icon_size = 20.0;
-                    ui.add(egui::Image::new(texture).max_size(egui::vec2(icon_size, icon_size)));
+                    let icon_response = ui.add(
+                        egui::Image::new(texture)
+                            .max_size(egui::vec2(icon_size, icon_size))
+                            .sense(egui::Sense::click())
+                    );
+
+                    if icon_response.clicked() {
+                        let now = Instant::now();
+                        // Remove clicks older than 1 second
+                        self.icon_click_times.retain(|&time| now.duration_since(time).as_secs_f32() < 1.0);
+                        // Add current click
+                        self.icon_click_times.push(now);
+
+                        // Check if we have 5 clicks
+                        if self.icon_click_times.len() >= 5 {
+                            log_info!("Developer mode toggled via 5 rapid clicks");
+                            self.show_developer = !self.show_developer;
+                            self.icon_click_times.clear();
+                        }
+                    }
+
                     ui.add_space(8.0);
                 }
 
@@ -567,7 +592,14 @@ impl eframe::App for SettingsGui {
                                     }
                                 });
                             if monitor_changed {
-                                self.state.update(|s| s.last_monitor = Some(self.selected_monitor));
+                                let new_monitor_hz = self.monitors[self.selected_monitor].refresh_rate as f32;
+                                self.state.update(|s| {
+                                    s.last_monitor = Some(self.selected_monitor);
+                                    // Update FPS cap to new monitor's refresh rate if enabled
+                                    if s.target_fps.is_some() {
+                                        s.target_fps = Some(new_monitor_hz);
+                                    }
+                                });
                                 self.restart_overlay_if_needed();
                             }
                             ui.end_row();
@@ -694,6 +726,49 @@ impl eframe::App for SettingsGui {
                 }
 
                 ui.add_space(15.0);
+
+                // Developer Settings (unlocked by clicking app icon 5 times)
+                if self.show_developer {
+                    ui.separator();
+                    ui.add_space(10.0);
+
+                    let _dev_header_response = egui::CollapsingHeader::new("Developer Settings")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.add_space(10.0);
+
+                            ui.label("Rendering Options:");
+                            let mut vsync_enabled = self.state.read(|s| s.vsync_enabled);
+                            if ui.checkbox(&mut vsync_enabled, "Enable VSync").changed() {
+                                self.state.update(|s| s.vsync_enabled = vsync_enabled);
+                                self.restart_overlay_if_needed();
+                            }
+
+                            ui.add_space(5.0);
+
+                            // FPS Cap to monitor refresh rate
+                            let target_fps = self.state.read(|s| s.target_fps);
+                            let mut fps_cap_enabled = target_fps.is_some();
+                            let monitor_hz = if self.selected_monitor < self.monitors.len() {
+                                self.monitors[self.selected_monitor].refresh_rate
+                            } else {
+                                60
+                            };
+
+                            if ui.checkbox(&mut fps_cap_enabled, format!("Cap to Monitor Refresh Rate ({}Hz)", monitor_hz)).changed() {
+                                if fps_cap_enabled {
+                                    self.state.update(|s| s.target_fps = Some(monitor_hz as f32));
+                                } else {
+                                    self.state.update(|s| s.target_fps = None);
+                                }
+                                self.restart_overlay_if_needed();
+                            }
+
+                            ui.add_space(10.0);
+                        });
+
+                    ui.add_space(15.0);
+                }
 
                 if let Some(ref msg) = self.status_message {
                     ui.label(msg);

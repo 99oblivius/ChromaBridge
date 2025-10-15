@@ -19,7 +19,7 @@ use windows::{
             Gdi::*,
         },
         UI::WindowsAndMessaging::*,
-        System::Com::*,
+        System::{Com::*, Threading::*},
     },
 };
 
@@ -27,6 +27,8 @@ pub struct OverlayState {
     pub spectrum_pair: SpectrumPair,
     pub noise_texture: Option<NoiseTexture>,
     pub hue_mapper: HueMapper,
+    pub vsync_enabled: bool,
+    pub target_fps: Option<f32>,
 }
 
 pub struct OverlayManager {
@@ -71,12 +73,14 @@ impl OverlayManager {
             return;
         }
 
-        let (spectrum_name, noise_name, strength, monitor_index) = self.app_state.read(|s| {
+        let (spectrum_name, noise_name, strength, monitor_index, vsync_enabled, target_fps) = self.app_state.read(|s| {
             (
                 s.spectrum_name.clone(),
                 s.noise_texture.clone(),
                 s.strength,
                 s.last_monitor.unwrap_or(0),
+                s.vsync_enabled,
+                s.target_fps,
             )
         });
 
@@ -143,12 +147,14 @@ impl OverlayManager {
                     spectrum_pair,
                     noise_texture,
                     hue_mapper,
+                    vsync_enabled,
+                    target_fps,
                 };
 
                 let overlay_state = Arc::new(RwLock::new(overlay_state));
 
                 let result = (|| -> Result<()> {
-                    let mut overlay = DCompOverlay::new(overlay_state, monitor_info, monitor_index)?;
+                    let mut overlay = DCompOverlay::new(overlay_state, monitor_info, monitor_index, vsync_enabled, target_fps)?;
                     overlay.run_message_loop(&running_flag, &frame_stats)
                 })();
 
@@ -369,15 +375,17 @@ struct DCompOverlay {
     capture_srv: Option<ID3D11ShaderResourceView>,
 
     desktop_duplication: Option<DesktopDuplicator>,
-    monitor_index: usize,
 
     width: u32,
     height: u32,
+    vsync_enabled: bool,
+    frame_latency_waitable: HANDLE,
+    target_fps: Option<f32>,
 }
 
 #[cfg(windows)]
 impl DCompOverlay {
-    unsafe fn new(state: Arc<RwLock<OverlayState>>, monitor_info: MonitorInfo, monitor_index: usize) -> Result<Self> {
+    unsafe fn new(state: Arc<RwLock<OverlayState>>, monitor_info: MonitorInfo, monitor_index: usize, vsync_enabled: bool, target_fps: Option<f32>) -> Result<Self> {
         let (pos, size) = (monitor_info.pos, monitor_info.size);
         let width = size.0 as u32;
         let height = size.1 as u32;
@@ -385,6 +393,12 @@ impl DCompOverlay {
         let hwnd = Self::create_overlay_window(pos, size)?;
         let (d3d_device, d3d_context) = Self::create_d3d_device()?;
         let swap_chain = Self::create_swap_chain(&d3d_device, width, height)?;
+
+        // Get waitable handle and set max frame latency for proper frame pacing
+        let swap_chain2: IDXGISwapChain2 = swap_chain.cast()?;
+        swap_chain2.SetMaximumFrameLatency(1)?;
+        let frame_latency_waitable = swap_chain2.GetFrameLatencyWaitableObject();
+        log_info!("Frame latency waitable object initialized");
 
         let dcomp_device: IDCompositionDevice = DCompositionCreateDevice(None)?;
         let dcomp_target = dcomp_device.CreateTargetForHwnd(hwnd, true)?;
@@ -432,9 +446,11 @@ impl DCompOverlay {
             capture_texture: None,
             capture_srv: None,
             desktop_duplication,
-            monitor_index,
             width,
             height,
+            vsync_enabled,
+            frame_latency_waitable,
+            target_fps,
         })
     }
 
@@ -531,7 +547,7 @@ impl DCompOverlay {
             BufferCount: 2,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
             AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-            Flags: 0,
+            Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
             ..Default::default()
         };
 
@@ -551,10 +567,19 @@ impl DCompOverlay {
             let mut frame_times: Vec<(f32, f32)> = Vec::with_capacity(60);
             let mut last_stats_update = std::time::Instant::now();
 
+            // Track time since last frame for accurate FPS capping
+            let mut last_frame_time = std::time::Instant::now();
+
             loop {
                 if !*running_flag.lock() {
                     log_info!("Overlay stop requested");
                     break;
+                }
+
+                // When VSync is disabled, wait for frame latency waitable object
+                // This provides proper frame pacing without the latency of VSync
+                if !self.vsync_enabled {
+                    WaitForSingleObjectEx(self.frame_latency_waitable, INFINITE, false);
                 }
 
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -568,7 +593,7 @@ impl DCompOverlay {
                     DispatchMessageW(&msg);
                 }
 
-                // Track frame start time
+                // Track frame start time (for stats)
                 let frame_start = std::time::Instant::now();
 
                 if let Err(e) = self.prepare_frame() {
@@ -586,8 +611,22 @@ impl DCompOverlay {
                 // Now call Present which will block on VSync
                 let _ = self.present_frame();
 
-                // Measure total frame time (including Present/VSync)
-                let total_frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+                // Apply FPS cap if enabled - use time since last frame to account for all overhead
+                if let Some(target_fps) = self.target_fps {
+                    let target_frame_duration = std::time::Duration::from_secs_f32(1.0 / target_fps);
+                    let elapsed_since_last = last_frame_time.elapsed();
+
+                    if elapsed_since_last < target_frame_duration {
+                        let remaining = target_frame_duration - elapsed_since_last;
+                        // spin_sleep uses hybrid sleep/spin with platform-specific tuning
+                        spin_sleep::sleep(remaining);
+                    }
+                }
+
+                // Capture timestamp IMMEDIATELY to avoid gaps
+                let now = std::time::Instant::now();
+                let total_frame_time_ms = now.duration_since(last_frame_time).as_secs_f32() * 1000.0;
+                last_frame_time = now;
                 frame_times.push((render_time_ms, total_frame_time_ms));
 
                 // Update stats every 100ms
@@ -766,7 +805,9 @@ impl DCompOverlay {
 
     #[cfg(windows)]
     unsafe fn present_frame(&mut self) -> Result<()> {
-        self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
+        // sync_interval: 0 = no vsync, 1 = vsync to refresh rate
+        let sync_interval = if self.vsync_enabled { 1 } else { 0 };
+        self.swap_chain.Present(sync_interval, DXGI_PRESENT(0)).ok()?;
         Ok(())
     }
 
