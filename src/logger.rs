@@ -10,10 +10,11 @@ pub struct SessionLogger {
     log_dir: PathBuf,
     retention_count: usize,
     app_name: String,
+    stream_to_stdout: bool,
 }
 
 impl SessionLogger {
-    pub fn new(log_dir: PathBuf, app_name: &str, retention_count: usize) -> Result<Self> {
+    pub fn new(log_dir: PathBuf, app_name: &str, retention_count: usize, stream_to_stdout: bool) -> Result<Self> {
         fs::create_dir_all(&log_dir)?;
 
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
@@ -26,6 +27,7 @@ impl SessionLogger {
             log_dir,
             retention_count,
             app_name: app_name.to_string(),
+            stream_to_stdout,
         };
 
         logger.clean_old_logs()?;
@@ -38,9 +40,27 @@ impl SessionLogger {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
         let log_line = format!("[{}] {}", timestamp, message.as_ref());
 
-        if let Ok(mut buffer) = self.log_buffer.lock() {
-            buffer.push(log_line);
+        // Only print to stdout when streaming mode is enabled
+        if self.stream_to_stdout {
+            println!("{}", log_line);
+            // In streaming mode, write to file immediately
+            let _ = self.write_line_to_file(&log_line);
+        } else {
+            // In buffered mode, add to buffer
+            if let Ok(mut buffer) = self.log_buffer.lock() {
+                buffer.push(log_line);
+            }
         }
+    }
+
+    fn write_line_to_file(&self, line: &str) -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log_path)?;
+        writeln!(file, "{}", line)?;
+        file.flush()?;
+        Ok(())
     }
 
     pub fn error(&self, message: impl AsRef<str>) {
@@ -122,8 +142,8 @@ impl Drop for SessionLogger {
 
 static LOGGER: once_cell::sync::OnceCell<SessionLogger> = once_cell::sync::OnceCell::new();
 
-pub fn init_logger(log_dir: PathBuf, app_name: &str, retention_count: usize) -> Result<()> {
-    let logger = SessionLogger::new(log_dir, app_name, retention_count)?;
+pub fn init_logger(log_dir: PathBuf, app_name: &str, retention_count: usize, stream_to_stdout: bool) -> Result<()> {
+    let logger = SessionLogger::new(log_dir, app_name, retention_count, stream_to_stdout)?;
     LOGGER.set(logger).map_err(|_| anyhow::anyhow!("Logger already initialized"))?;
     Ok(())
 }
@@ -157,6 +177,10 @@ pub fn finalize_logs() -> Result<()> {
         logger.finalize()?;
     }
     Ok(())
+}
+
+pub fn get_log_path() -> Option<PathBuf> {
+    LOGGER.get().map(|logger| logger.log_path.clone())
 }
 
 #[macro_export]
