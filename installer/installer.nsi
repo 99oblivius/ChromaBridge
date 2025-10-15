@@ -1,8 +1,11 @@
 ; ChromaBridge NSIS Installer Script
+; VERSION should be passed via command line: makensis /DVERSION=X.Y.Z installer.nsi
 
 !define APP_NAME "ChromaBridge"
 !define COMP_NAME "ChromaBridge"
-!define VERSION "0.1.0"
+!ifndef VERSION
+  !define VERSION "0.0.0"
+!endif
 !define COPYRIGHT "© 2025"
 !define DESCRIPTION "Ultra-fast color blind assistance overlay"
 !define INSTALLER_NAME "ChromaBridge-Setup.exe"

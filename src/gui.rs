@@ -340,7 +340,7 @@ impl eframe::App for SettingsGui {
                 );
 
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("2025.15").size(10.0).color(egui::Color32::from_rgb(140, 140, 140)));
+                ui.label(egui::RichText::new(env!("CARGO_PKG_VERSION")).size(10.0).color(egui::Color32::from_rgb(140, 140, 140)));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let close_response = ui.add_sized(
