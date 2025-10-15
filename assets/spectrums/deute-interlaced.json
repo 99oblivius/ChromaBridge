@@ -1,0 +1,26 @@
+{
+  "spectra": [
+    {
+      "nodes": [
+        {"position": 0.0, "color": "#000000"},
+        {"position": 0.16666666666666666, "color": "#FFFF00"},
+        {"position": 0.3333333333333333, "color": "#FFFF00"},
+        {"position": 0.5, "color": "#FFFFFF"},
+        {"position": 0.6666666666666666, "color": "#0000FF"},
+        {"position": 0.8333333333333334, "color": "#000000"},
+        {"position": 1.0, "color": "#000000"}
+      ]
+    },
+    {
+      "nodes": [
+        {"position": 0.0, "color": "#FFFF00"},
+        {"position": 0.16666666666666666, "color": "#FFFF00"},
+        {"position": 0.24910394265232974, "color": "#FFFFFF"},
+        {"position": 0.3333333333333333, "color": "#0000FF"},
+        {"position": 0.8333333333333334, "color": "#0000FF"},
+        {"position": 0.9166666666666666, "color": "#FFFFFF"},
+        {"position": 1.0, "color": "#FFFF00"}
+      ]
+    }
+  ]
+}
