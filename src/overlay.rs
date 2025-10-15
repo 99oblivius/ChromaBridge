@@ -33,6 +33,7 @@ pub struct OverlayManager {
     app_state: Arc<StateManager>,
     running: Arc<Mutex<bool>>,
     overlay_thread: Mutex<Option<thread::JoinHandle<()>>>,
+    last_monitor: Mutex<Option<usize>>,
 }
 
 impl OverlayManager {
@@ -41,6 +42,7 @@ impl OverlayManager {
             app_state: state,
             running: Arc::new(Mutex::new(false)),
             overlay_thread: Mutex::new(None),
+            last_monitor: Mutex::new(None),
         }
     }
 
@@ -112,9 +114,10 @@ impl OverlayManager {
 
         let running_flag = Arc::clone(&self.running);
         *running = true;
+        *self.last_monitor.lock() = Some(monitor_index);
 
         let handle = thread::spawn(move || {
-            log_info!("Overlay thread started");
+            log_info!("Overlay thread started (Monitor {})", monitor_index);
 
             #[cfg(windows)]
             unsafe {
@@ -138,7 +141,7 @@ impl OverlayManager {
                 let overlay_state = Arc::new(RwLock::new(overlay_state));
 
                 let result = (|| -> Result<()> {
-                    let mut overlay = DCompOverlay::new(overlay_state, monitor_info)?;
+                    let mut overlay = DCompOverlay::new(overlay_state, monitor_info, monitor_index)?;
                     overlay.run_message_loop(&running_flag)
                 })();
 
@@ -158,8 +161,11 @@ impl OverlayManager {
         });
 
         *self.overlay_thread.lock() = Some(handle);
-        self.app_state.update(|s| s.overlay_enabled = true);
-        log_info!("Overlay started");
+        self.app_state.update(|s| {
+            s.overlay_enabled = true;
+            s.last_overlay_enabled = true;
+        });
+        log_info!("Overlay started (Monitor {}, Spectrum: {})", monitor_index, spectrum_name);
     }
 
     pub fn stop(&self) {
@@ -175,8 +181,17 @@ impl OverlayManager {
             let _ = handle.join();
         }
 
-        self.app_state.update(|s| s.overlay_enabled = false);
-        log_info!("Overlay stopped");
+        let monitor_idx = self.last_monitor.lock().take();
+        self.app_state.update(|s| {
+            s.overlay_enabled = false;
+            s.last_overlay_enabled = false;
+        });
+
+        if let Some(idx) = monitor_idx {
+            log_info!("Overlay stopped (Monitor {})", idx);
+        } else {
+            log_info!("Overlay stopped");
+        }
     }
 }
 
@@ -261,6 +276,63 @@ unsafe extern "system" fn monitor_enum_proc(
 }
 
 #[cfg(windows)]
+struct DesktopDuplicator {
+    output_duplication: IDXGIOutputDuplication,
+    _d3d_device: ID3D11Device,
+    _d3d_context: ID3D11DeviceContext,
+}
+
+#[cfg(windows)]
+impl DesktopDuplicator {
+    unsafe fn new(d3d_device: ID3D11Device, d3d_context: ID3D11DeviceContext, monitor_index: usize) -> Result<Self> {
+        let dxgi_device: IDXGIDevice = d3d_device.cast()?;
+        let dxgi_adapter = dxgi_device.GetAdapter()?;
+
+        let output: IDXGIOutput = dxgi_adapter.EnumOutputs(monitor_index as u32)?;
+        let output1: IDXGIOutput1 = output.cast()?;
+
+        let output_duplication = output1.DuplicateOutput(&d3d_device)?;
+
+        log_info!("Desktop duplication initialized for monitor {}", monitor_index);
+
+        Ok(Self {
+            output_duplication,
+            _d3d_device: d3d_device,
+            _d3d_context: d3d_context,
+        })
+    }
+
+    unsafe fn acquire_next_frame(&mut self, timeout_ms: u32) -> Result<Option<ID3D11Texture2D>> {
+        let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = std::mem::zeroed();
+        let mut desktop_resource: Option<IDXGIResource> = None;
+
+        match self.output_duplication.AcquireNextFrame(timeout_ms, &mut frame_info, &mut desktop_resource) {
+            Ok(_) => {
+                if let Some(resource) = desktop_resource {
+                    let texture: ID3D11Texture2D = resource.cast()?;
+                    Ok(Some(texture))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(e) => {
+                // DXGI_ERROR_WAIT_TIMEOUT means no new frame
+                if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                    return Ok(None);
+                }
+                // DXGI_ERROR_ACCESS_LOST means we need to recreate the duplicator
+                Err(anyhow::anyhow!("Failed to acquire frame: {:?}", e))
+            }
+        }
+    }
+
+    unsafe fn release_frame(&mut self) -> Result<()> {
+        self.output_duplication.ReleaseFrame()?;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
 struct DCompOverlay {
     _hwnd: HWND,
     d3d_device: ID3D11Device,
@@ -286,13 +358,16 @@ struct DCompOverlay {
     capture_texture: Option<ID3D11Texture2D>,
     capture_srv: Option<ID3D11ShaderResourceView>,
 
+    desktop_duplication: Option<DesktopDuplicator>,
+    monitor_index: usize,
+
     width: u32,
     height: u32,
 }
 
 #[cfg(windows)]
 impl DCompOverlay {
-    unsafe fn new(state: Arc<RwLock<OverlayState>>, monitor_info: MonitorInfo) -> Result<Self> {
+    unsafe fn new(state: Arc<RwLock<OverlayState>>, monitor_info: MonitorInfo, monitor_index: usize) -> Result<Self> {
         let (pos, size) = (monitor_info.pos, monitor_info.size);
         let width = size.0 as u32;
         let height = size.1 as u32;
@@ -316,6 +391,15 @@ impl DCompOverlay {
 
         let (spectrum1_srv, spectrum2_srv, noise_srv, constant_buffer) = Self::init_spectrum_textures(&d3d_device, &state)?;
 
+        // Initialize desktop duplication
+        let desktop_duplication = match DesktopDuplicator::new(d3d_device.clone(), d3d_context.clone(), monitor_index) {
+            Ok(dd) => Some(dd),
+            Err(e) => {
+                log_warn!("Failed to initialize desktop duplication: {}. Falling back to test pattern.", e);
+                None
+            }
+        };
+
         Ok(Self {
             _hwnd: hwnd,
             d3d_device,
@@ -337,6 +421,8 @@ impl DCompOverlay {
             constant_buffer,
             capture_texture: None,
             capture_srv: None,
+            desktop_duplication,
+            monitor_index,
             width,
             height,
         })
@@ -487,7 +573,46 @@ impl DCompOverlay {
 
     #[cfg(windows)]
     unsafe fn render_frame(&mut self) -> Result<()> {
-        if self.capture_texture.is_none() {
+        // Try to acquire a new frame from desktop duplication
+        if let Some(ref mut duplicator) = self.desktop_duplication {
+            if let Some(acquired_texture) = duplicator.acquire_next_frame(0)? {
+                // Copy the acquired frame to our capture texture
+                if self.capture_texture.is_none() {
+                    // Create a staging texture that can be used as a shader resource
+                    let texture_desc = D3D11_TEXTURE2D_DESC {
+                        Width: self.width,
+                        Height: self.height,
+                        MipLevels: 1,
+                        ArraySize: 1,
+                        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                        Usage: D3D11_USAGE_DEFAULT,
+                        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                    };
+
+                    let mut texture: Option<ID3D11Texture2D> = None;
+                    self.d3d_device.CreateTexture2D(&texture_desc, None, Some(&mut texture))?;
+                    let texture = texture.unwrap();
+
+                    let mut srv: Option<ID3D11ShaderResourceView> = None;
+                    self.d3d_device.CreateShaderResourceView(&texture, None, Some(&mut srv))?;
+
+                    self.capture_texture = Some(texture);
+                    self.capture_srv = Some(srv.unwrap());
+                }
+
+                // Copy the acquired frame to our texture
+                if let Some(ref capture_texture) = self.capture_texture {
+                    self.d3d_context.CopyResource(capture_texture, &acquired_texture);
+                }
+
+                // Release the acquired frame
+                duplicator.release_frame()?;
+            }
+        } else if self.capture_texture.is_none() {
+            // Fallback: Create test pattern if desktop duplication is not available
             let mut test_pixels = vec![0u8; (self.width * self.height * 4) as usize];
             for y in 0..self.height {
                 for x in 0..self.width {
