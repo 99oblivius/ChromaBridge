@@ -1,214 +1,76 @@
-# ChromaBridge
+<p align="center">
+  <img src="icons/icon-2048.png" width="128">
+</p>
+<p align="center" style="font-size:40px">
+  ChromaBridge 
+</p>
+</br>
+An easy to use and low latency color blindness tool for simulated trichromatism.  
 
-An ultra-fast color blind assistance overlay built with Rust.
+## UI
+### Menu
+![Graphical User Interface](docs/menu.png)  
+<sub>Click the menu's application icon (top left) rapidly five times to enable Developer options</sub>
 
-## Project Structure
-
-This is a **self-contained project** with all necessary files:
-
-```
-chromabridge/
-├── src/                    # Source code
-│   ├── main.rs            # Tray icon + Windows message pump
-│   ├── gui.rs             # egui settings window
-│   ├── overlay.rs         # DirectComposition + D3D11 rendering
-│   ├── state.rs           # State manager (Arc<RwLock> + SQLite)
-│   ├── spectrum.rs        # Color mapping and spectrum loading
-│   ├── hue_mapper.rs      # HSV ↔ RGB conversion
-│   ├── noise.rs           # Noise texture loading
-│   ├── logger.rs          # Session-based logging
-│   ├── shaders.hlsl       # GPU pixel shaders
-│   └── lib.rs             # Module exports
-├── assets/                # Runtime assets
-│   ├── icons/            # Application icons
-│   │   ├── icon.ico
-│   │   └── icon-2048.png
-│   ├── spectrums/        # Example spectrum files
-│   └── example-protanopia.json
-├── dev_assets/            # Development files
-│   ├── spectrums/        # Example/test spectrum files
-│   ├── noise/            # Test noise textures
-│   ├── visualize_spectrum.py  # Visualization tool
-│   └── README.md         # Dev assets documentation
-├── installer/             # NSIS installer
-│   └── installer.nsi
-├── Cargo.toml            # Rust project manifest
-├── build.rs              # Build script (Windows resources)
-├── build-installer.ps1   # Installer build script
-├── LICENSE.txt           # MIT License
-└── README.md             # This file
-```
-
-## Building
-
-### Prerequisites
-
-- **Rust** toolchain (MSRV 2021 edition)
-- **Windows** 10/11 (required for DirectComposition + D3D11)
-- **NSIS** (optional, for creating installer)
-
-### Build Binary
-
-```powershell
-# From the chromabridge directory
-cargo build --release
-```
-
-Binary output: `target/release/chromabridge.exe` (approx. 14MB)
-
-### Build Installer
-
-```powershell
-# From the chromabridge directory
-.\build-installer.ps1
-```
-
-This will:
-1. Build the release binary
-2. Create the NSIS installer at `target/ChromaBridge-Setup.exe`
-
-## Installation
-
-### From Installer
-
-Run `ChromaBridge-Setup.exe` to install:
-- **Install Location**: `%LOCALAPPDATA%\ChromaBridge\`
-- **No Admin Required**: User-level installation
-- **Optional Shortcuts**: Start Menu and Desktop
-- **Uninstaller**: Available in Windows Settings → Apps
-
-### From Binary
-
-Copy `chromabridge.exe` anywhere and run it. The application will:
-- Create `%APPDATA%\ChromaBridge\` for settings
-- Store state in `state.db` (SQLite)
-- Create `assets/spectrums/` and `assets/noise/` subdirectories
-- Generate session logs in `logs/`
-
-## Usage
-
-1. **Launch** ChromaBridge (appears as system tray icon)
-2. **Click tray icon** or select "Open Settings" to open the settings window
-3. **Configure**:
-   - Select monitor (if multiple displays)
-   - Choose color blind type (spectrum file)
-   - Adjust correction strength (0.0–1.0)
-   - Optional: Select noise pattern for interlacing
-4. **Enable Overlay** via "Start Overlay" button or tray menu
-
-### System Tray Menu
-
-- **Open Settings** - Launch settings window
-- **Enable Overlay** ✓ - Toggle overlay on/off
+### System Tray
+Left click to open settings.  
+Right click:
+- **Open Settings**
+- **Enable Overlay** - Toggle overlay
 - **Exit** - Close application
 
-### Advanced Settings
+</br>
 
-- **Run at Windows startup** - Launch ChromaBridge when Windows starts
-- **Start overlay on launch** - Auto-enable overlay
-- **Keep running in Tray** - Minimize to tray instead of closing
-- **Open Asset Folder** - Quick access to `%APPDATA%\ChromaBridge\assets\`
-- **Refresh Assets** - Reload spectrum/noise file lists
+## Features
+- **Real-time GPU acceleration**: Ultra-low latency and negligable performance impact (suited for running video games alongside)
+- **Multi-monitor support**: Automatic refresh rate detection
+- **Automatic startup** option launches ChromaBridge when Windows starts
+## Limitations
+- Minimum 1 frame latency
+- Currently only implemented for Windows 10/11
+- One overlay per display (multiple ChromaBridge instances can run concurrently)
+## Installation
+The latest installation binary is available here **[[Releases]](https://github.com/99oblivius/ChromaBridge/releases)**  
+The installer will walk you through installing the ChromaBridge application to your user account.
+- **Install Location**: `%LOCALAPPDATA%\ChromaBridge\`
+- **Appdata Location**: `%APPDATA%\ChromaBridge\`
+- **Optional Shortcuts**: Start Menu and Desktop
+- Includes Uninstaller
+## Building
+### Prerequisites
+- **Rust** toolchain (MSRV 2021 edition)
+- **Windows** 10/11 (required for DirectComposition + D3D11)
+- **NSIS** (for installer creation with `./build-installer.ps1`)
+### Build Binary
+`./build-installer.ps1` builds for release and places installer at `target/ChromaBridge-Setup.exe`
 
-## Architecture
-
-ChromaBridge uses a **monolithic threaded architecture**:
-
-- **Main Thread** - System tray + Windows message pump
-- **GUI Thread** - egui settings window (spawned on demand)
-- **Overlay Thread** - DirectComposition rendering (spawned when enabled)
-
-All threads share state via `Arc<RwLock<AppState>>` with async SQLite persistence.
-
-### State Management
-
-- **In-memory**: `Arc<RwLock<AppState>>` for fast concurrent reads
-- **Persistence**: Background thread + crossbeam-channel for async writes
-- **SQLite**: WAL mode, single JSON blob (KISS approach)
-
-### Rendering Pipeline
-
-1. **Screen Capture** (TODO: Desktop Duplication API - currently test pattern)
-2. **GPU Upload** - Screen texture → t0
-3. **Pixel Shader** (HLSL):
-   - Convert RGB → HSV
-   - Sample noise texture (t3) if enabled
-   - Select spectrum based on noise (t1 or t2)
-   - Lookup corrected hue from 360-element spectrum texture
-   - Interpolate using strength parameter
-   - Preserve saturation/value with brightness compensation
-   - Convert HSV → RGB
-4. **Present** - DirectComposition swap chain (FLIP_SEQUENTIAL)
-
-## Development
-
-### Dev Assets
-
-See `dev_assets/README.md` for:
-- Example spectrum files
-- Visualization tools
-- Testing guidance
-
-### Adding Spectrum Files
-
-1. Create JSON file in `dev_assets/spectrums/`
-2. Test with `visualize_spectrum.py`
-3. Copy to `%APPDATA%\ChromaBridge\assets\spectrums\`
-4. Refresh assets in ChromaBridge settings
-
-### Spectrum Format
-
-ChromaBridge supports two spectrum formats:
-
-**Legacy (Hue Mapping)**
-```json
-[
-  {
-    "0": 50,
-    "27": 120,
-    "57": 220,
-    ...
-  }
-]
+OR  
+```powershell
+cargo build --release
 ```
-
-**Node-Based (Color Nodes)**
+### Adding new Spectra
+1. Create JSON file in `chromabridge\assets\spectrums\`
+2. Test with `visualize_spectrum.py` (tested with Python 3.13+ and requires PIL + numpy)
+3. View output spectra in `chromabridge\tools\output\`
+4. Copy JSON to `%APPDATA%\ChromaBridge\assets\spectrums\`
+5. Refresh assets in ChromaBridge settings
+#### Spectrum example
+**Node-Based**
 ```json
 {
   "spectra": [
     {
       "nodes": [
-        {"position": 0.0, "color": "#FF0000"},
-        {"position": 0.5, "color": "#00FF00"},
-        {"position": 1.0, "color": "#0000FF"}
+        {"color": "#FF0000", "position": 0.0},
+        {"color": "#00FF00", "position": 0.333},
+        {"color": "#0000FF", "position": 0.667},
+        {"color": "#FF0000", "position": 1.0}
       ]
     }
   ]
 }
 ```
-
-## Known Limitations
-
-- **Windows Only** - Uses DirectComposition and D3D11
-- **Desktop Duplication TODO** - Currently uses test pattern gradient
-  - Planned: Windows Graphics Capture API or Desktop Duplication API
-  - Note: WDA_EXCLUDEFROMCAPTURE prevents recursive capture
-- **Single Overlay** - One overlay instance at a time
-
-## Future Enhancements
-
-- [ ] Implement Desktop Duplication API for real screen capture
-- [ ] Add preset spectrums (protanopia, deuteranopia, tritanopia)
-- [ ] Provide sample noise textures (Bayer, blue noise, checkerboard)
-- [ ] Global hotkey support for quick overlay toggle
-- [ ] Per-application targeting (capture specific windows)
-- [ ] FPS/frame time overlay display
-- [ ] GPU vendor optimizations
-
-## License
-
-MIT License - See LICENSE.txt for details
-
-## Contributing
-
-This project is currently in development. Contributions for Desktop Duplication API implementation and preset spectrum files are welcome!
+`spectra` value supports a list of spectra described by nodes ranging between position 0.0 and 1.0 (float).  
+ChromaBridge currently supports single or double spectra for interlacing by noise textures.
+## Acknowledgements
+This project was inspired by Kilian-Roy Lachner's [Custom Color Vision](https://www.color-in-color.info/color-in-color/custom-color-vision) application. Their research and discoveries in regards to "functional trichomacy for the colorblind" enabled this project. 
