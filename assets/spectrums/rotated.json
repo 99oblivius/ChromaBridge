@@ -1,0 +1,15 @@
+{
+  "spectra": [
+    {
+      "nodes": [
+        {"position": 0.0, "color": "#00FFFF"},
+        {"position": 0.167, "color": "#0000FF"},
+        {"position": 0.333, "color": "#FF00FF"},
+        {"position": 0.5, "color": "#FF0000"},
+        {"position": 0.667, "color": "#FFFF00"},
+        {"position": 0.833, "color": "#00FF00"},
+        {"position": 1.0, "color": "#00FFFF"}
+      ]
+    }
+  ]
+}

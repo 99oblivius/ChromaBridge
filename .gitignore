@@ -38,3 +38,6 @@ Thumbs.db
 
 # Development assets (track in git, excluded from installer automatically)
 # .blend files in icons/ are source files only
+
+# python
+__pycache__/
