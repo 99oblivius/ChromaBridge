@@ -502,7 +502,9 @@ impl eframe::App for SettingsGui {
                     egui::Sense::click_and_drag(),
                 );
 
-                if title_response.is_pointer_button_down_on() {
+                // Only drag with primary (left) mouse button
+                let primary_down = ctx.input(|i| i.pointer.primary_down());
+                if title_response.is_pointer_button_down_on() && primary_down {
                     if !self.dragging {
                         log_info!("Title bar drag started");
                         self.dragging = true;
