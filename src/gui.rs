@@ -608,15 +608,7 @@ impl eframe::App for SettingsGui {
                         }
                         ui.end_row();
 
-                        ui.label("Correction Strength:");
-                        if ui.add(egui::Slider::new(&mut self.strength, 0.0..=1.0).text("")).changed() {
-                            self.state.update(|s| s.strength = self.strength);
-                            self.strength_changed = true;
-                            self.strength_last_change = Instant::now();
-                        }
-                        ui.end_row();
-
-                        ui.label("Noise Pattern:");
+                        ui.label("Interlace Pattern:");
                         let noise_text = self.selected_noise
                             .map(|i| self.noise_files.get(i).map(|n| Self::truncate_with_ellipsis(n, 30)).unwrap_or_else(|| "Invalid".to_string()))
                             .unwrap_or_else(|| "None".to_string());
@@ -641,6 +633,14 @@ impl eframe::App for SettingsGui {
                             self.restart_overlay_if_needed();
                         }
                         ui.end_row();
+
+                        ui.label("Correction Strength:");
+                        if ui.add(egui::Slider::new(&mut self.strength, 0.0..=1.0).text("")).changed() {
+                            self.state.update(|s| s.strength = self.strength);
+                            self.strength_changed = true;
+                            self.strength_last_change = Instant::now();
+                        }
+                        ui.end_row();
                     });
 
                 ui.add_space(20.0);
@@ -658,7 +658,7 @@ impl eframe::App for SettingsGui {
                                 self.open_asset_folder();
                             }
 
-                            if ui.button("Refresh Assets").clicked() {
+                            if ui.button("↻").clicked() {
                                 self.refresh_assets();
                             }
                         });
@@ -669,21 +669,9 @@ impl eframe::App for SettingsGui {
                         let mut run_at_startup = self.state.read(|s| s.run_at_startup);
                         if ui.checkbox(&mut run_at_startup, "Run at Windows startup").changed() {
                             if let Ok(exe_path) = std::env::current_exe() {
-                                match set_startup_registry(run_at_startup, &exe_path) {
-                                    Ok(_) => {
-                                        self.state.update(|s| s.run_at_startup = run_at_startup);
-                                        self.status_message = Some(format!(
-                                            "Startup: {}",
-                                            if run_at_startup { "Enabled" } else { "Disabled" }
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        self.status_message = Some(format!("Failed to update startup: {}", e));
-                                        // Revert checkbox by not updating state
-                                    }
+                                if set_startup_registry(run_at_startup, &exe_path).is_ok() {
+                                    self.state.update(|s| s.run_at_startup = run_at_startup);
                                 }
-                            } else {
-                                self.status_message = Some("Failed to get exe path".to_string());
                             }
                         }
 
