@@ -2,7 +2,7 @@
 
 [package]
 name = "chromabridge"
-version = "0.2025.15"
+version = "0.2025.29"
 edition = "2021"
 authors = ["Color Interlacer Contributors"]
 

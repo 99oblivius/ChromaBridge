@@ -72,5 +72,11 @@ cargo build --release
 ```
 `spectra` value supports a list of spectra described by nodes ranging between position 0.0 and 1.0 (float).  
 ChromaBridge currently supports single or double spectra for interlacing by noise textures.
+## Versioning
+ChromaBridge follows the versioning format: `0.YEAR.COMMIT_COUNT`
+- **Year**: Current calendar year
+- **Commit Count**: Total number of commits in the repository
+
+Example: `0.2025.29` represents the 29th commit in the year 2025.
 ## Acknowledgements
 This project was inspired by Kilian-Roy Lachner's [Custom Color Vision](https://www.color-in-color.info/color-in-color/custom-color-vision) application. Their research and discoveries in regards to "functional trichomacy for the colorblind" enabled this project. 
