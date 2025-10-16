@@ -405,12 +405,10 @@ impl eframe::App for SettingsGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use crate::log_info;
 
-        // Disable text selection globally
         ctx.style_mut(|style| {
             style.interaction.selectable_labels = false;
         });
 
-        // Check for close signal from main thread (for immediate exit)
         if let Some(ref rx) = self.close_receiver {
             if rx.try_recv().is_ok() {
                 log_info!("Close signal received - closing GUI window");
@@ -419,31 +417,25 @@ impl eframe::App for SettingsGui {
             }
         }
 
-        // Check for toggle signal from tray menu
         if let Some(ref rx) = self.toggle_receiver {
             if rx.try_recv().is_ok() {
                 log_info!("Toggle signal received from tray menu");
                 if let Some(ref callback) = self.overlay_toggle_callback {
                     callback();
                 }
-                // Update tray state immediately
                 self.update_tray_state();
-                // Force repaint to update button text immediately
                 ctx.request_repaint();
             }
         }
 
-        // Focus window on first frame to bring it to front
         if self.first_frame {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 
-            // Store context so main thread can force repaints
             if let Some(ref storage) = self.app_ctx_storage {
                 *storage.lock() = Some(ctx.clone());
                 log_info!("GUI context stored for exit signaling");
             }
 
-            // Load icon on first frame
             if let Ok(icon_path) = std::env::current_exe() {
                 if let Some(parent) = icon_path.parent() {
                     let icon_file = parent.join("icon.ico");
@@ -469,7 +461,6 @@ impl eframe::App for SettingsGui {
             ui.horizontal_centered(|ui| {
                 ui.add_space(8.0);
 
-                // App icon (clickable for developer mode)
                 if let Some(ref texture) = self.icon_texture {
                     let icon_size = 20.0;
                     let icon_response = ui.add(
@@ -480,12 +471,9 @@ impl eframe::App for SettingsGui {
 
                     if icon_response.clicked() {
                         let now = Instant::now();
-                        // Remove clicks older than 1 second
                         self.icon_click_times.retain(|&time| now.duration_since(time).as_secs_f32() < 1.0);
-                        // Add current click
                         self.icon_click_times.push(now);
 
-                        // Check if we have 5 clicks
                         if self.icon_click_times.len() >= 5 {
                             log_info!("Developer mode toggled via 5 rapid clicks");
                             self.show_developer = !self.show_developer;
@@ -502,7 +490,6 @@ impl eframe::App for SettingsGui {
                     egui::Sense::click_and_drag(),
                 );
 
-                // Only drag with primary (left) mouse button
                 let primary_down = ctx.input(|i| i.pointer.primary_down());
                 if title_response.is_pointer_button_down_on() && primary_down {
                     if !self.dragging {
@@ -552,11 +539,9 @@ impl eframe::App for SettingsGui {
                         if let Some(ref callback) = self.overlay_toggle_callback {
                             callback();
                         }
-                        // Update tray state immediately
                         self.update_tray_state();
                     }
 
-                    // Display FPS and frame time when overlay is running
                     if overlay_running {
                         if let Some((fps, frame_time_ms)) = self.overlay_manager.get_frame_stats() {
                             ui.add_space(10.0);
@@ -688,7 +673,6 @@ impl eframe::App for SettingsGui {
                         ui.label("System Options:");
                         let mut run_at_startup = self.state.read(|s| s.run_at_startup);
                         if ui.checkbox(&mut run_at_startup, "Run at Windows startup").changed() {
-                            // Get exe path
                             if let Ok(exe_path) = std::env::current_exe() {
                                 match set_startup_registry(run_at_startup, &exe_path) {
                                     Ok(_) => {
@@ -748,7 +732,6 @@ impl eframe::App for SettingsGui {
 
                             ui.add_space(5.0);
 
-                            // FPS Cap to monitor refresh rate
                             let target_fps = self.state.read(|s| s.target_fps);
                             let mut fps_cap_enabled = target_fps.is_some();
                             let monitor_hz = if self.selected_monitor < self.monitors.len() {

@@ -194,7 +194,6 @@ impl OverlayManager {
             let _ = handle.join();
         }
 
-        // Clear frame stats
         *self.frame_stats.lock() = None;
 
         let monitor_idx = self.last_monitor.lock().take();
@@ -332,11 +331,9 @@ impl DesktopDuplicator {
                 }
             }
             Err(e) => {
-                // DXGI_ERROR_WAIT_TIMEOUT means no new frame
                 if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
                     return Ok(None);
                 }
-                // DXGI_ERROR_ACCESS_LOST means we need to recreate the duplicator
                 Err(anyhow::anyhow!("Failed to acquire frame: {:?}", e))
             }
         }
@@ -415,7 +412,6 @@ impl DCompOverlay {
 
         let (spectrum1_srv, spectrum2_srv, noise_srv, constant_buffer) = Self::init_spectrum_textures(&d3d_device, &state)?;
 
-        // Initialize desktop duplication
         let desktop_duplication = match DesktopDuplicator::new(d3d_device.clone(), d3d_context.clone(), monitor_index) {
             Ok(dd) => Some(dd),
             Err(e) => {
@@ -563,11 +559,9 @@ impl DCompOverlay {
             let mut last_error_log = std::time::Instant::now();
             let mut error_count = 0u32;
 
-            // Frame timing tracking (render_time, total_time)
             let mut frame_times: Vec<(f32, f32)> = Vec::with_capacity(60);
             let mut last_stats_update = std::time::Instant::now();
 
-            // Track time since last frame for accurate FPS capping
             let mut last_frame_time = std::time::Instant::now();
 
             loop {
@@ -576,8 +570,6 @@ impl DCompOverlay {
                     break;
                 }
 
-                // When VSync is disabled, wait for frame latency waitable object
-                // This provides proper frame pacing without the latency of VSync
                 if !self.vsync_enabled {
                     WaitForSingleObjectEx(self.frame_latency_waitable, INFINITE, false);
                 }
@@ -593,7 +585,6 @@ impl DCompOverlay {
                     DispatchMessageW(&msg);
                 }
 
-                // Track frame start time (for stats)
                 let frame_start = std::time::Instant::now();
 
                 if let Err(e) = self.prepare_frame() {
@@ -604,11 +595,7 @@ impl DCompOverlay {
                         last_error_log = std::time::Instant::now();
                     }
                 }
-
-                // Measure rendering time before Present (excludes VSync wait)
                 let render_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-
-                // Now call Present which will block on VSync
                 let _ = self.present_frame();
 
                 // Apply FPS cap if enabled - use time since last frame to account for all overhead
@@ -617,21 +604,15 @@ impl DCompOverlay {
                     let elapsed_since_last = last_frame_time.elapsed();
 
                     if elapsed_since_last < target_frame_duration {
-                        let remaining = target_frame_duration - elapsed_since_last;
-                        // spin_sleep uses hybrid sleep/spin with platform-specific tuning
-                        spin_sleep::sleep(remaining);
+                        spin_sleep::sleep(target_frame_duration - elapsed_since_last);
                     }
                 }
-
-                // Capture timestamp IMMEDIATELY to avoid gaps
                 let now = std::time::Instant::now();
                 let total_frame_time_ms = now.duration_since(last_frame_time).as_secs_f32() * 1000.0;
                 last_frame_time = now;
                 frame_times.push((render_time_ms, total_frame_time_ms));
 
-                // Update stats every 100ms
                 if last_stats_update.elapsed().as_millis() >= 100 && !frame_times.is_empty() {
-                    // Calculate averages
                     let (sum_render, sum_total): (f32, f32) = frame_times.iter()
                         .fold((0.0, 0.0), |(r, t), &(render, total)| (r + render, t + total));
                     let avg_render_time = sum_render / frame_times.len() as f32;
@@ -643,8 +624,6 @@ impl DCompOverlay {
                     } else {
                         0.0
                     };
-
-                    // Update shared stats (fps from total, but show render time)
                     *frame_stats.lock() = Some((fps, avg_render_time));
 
                     // Keep only last 60 frames for rolling average
@@ -665,10 +644,8 @@ impl DCompOverlay {
 
     #[cfg(windows)]
     unsafe fn prepare_frame(&mut self) -> Result<()> {
-        // Try to acquire a new frame from desktop duplication
         if let Some(ref mut duplicator) = self.desktop_duplication {
             if let Some(acquired_texture) = duplicator.acquire_next_frame(0)? {
-                // Copy the acquired frame to our capture texture
                 if self.capture_texture.is_none() {
                     // Create a staging texture that can be used as a shader resource
                     let texture_desc = D3D11_TEXTURE2D_DESC {
@@ -695,12 +672,10 @@ impl DCompOverlay {
                     self.capture_srv = Some(srv.unwrap());
                 }
 
-                // Copy the acquired frame to our texture
                 if let Some(ref capture_texture) = self.capture_texture {
                     self.d3d_context.CopyResource(capture_texture, &acquired_texture);
                 }
 
-                // Release the acquired frame
                 duplicator.release_frame()?;
             }
         } else if self.capture_texture.is_none() {

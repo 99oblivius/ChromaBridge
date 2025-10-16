@@ -22,7 +22,6 @@ pub struct AppState {
     pub debug_overlay: bool,
     pub log_retention_count: usize,
 
-    // New fields for improved state management
     #[serde(default = "default_open_gui_on_launch")]
     pub open_gui_on_launch: bool,
     #[serde(default)]
@@ -30,7 +29,6 @@ pub struct AppState {
     #[serde(default)]
     pub last_overlay_enabled: bool,
 
-    // Developer options
     #[serde(default = "default_vsync_enabled")]
     pub vsync_enabled: bool,
     #[serde(default = "default_target_fps")]
@@ -63,12 +61,10 @@ impl Default for AppState {
             debug_overlay: false,
             log_retention_count: 10,
 
-            // New field defaults
             open_gui_on_launch: true,
             show_advanced_settings: false,
             last_overlay_enabled: false,
 
-            // Developer option defaults
             vsync_enabled: true,
             target_fps: None,
         }
