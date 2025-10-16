@@ -29,18 +29,12 @@ pub struct AppState {
     #[serde(default)]
     pub last_overlay_enabled: bool,
 
-    #[serde(default = "default_vsync_enabled")]
-    pub vsync_enabled: bool,
-    #[serde(default = "default_target_fps")]
-    pub target_fps: Option<f32>,
+    #[serde(default = "default_cap_to_monitor_refresh")]
+    pub cap_to_monitor_refresh: bool,
 }
 
-fn default_vsync_enabled() -> bool {
+fn default_cap_to_monitor_refresh() -> bool {
     true
-}
-
-fn default_target_fps() -> Option<f32> {
-    None // Default to no FPS cap
 }
 
 fn default_open_gui_on_launch() -> bool {
@@ -65,8 +59,7 @@ impl Default for AppState {
             show_advanced_settings: false,
             last_overlay_enabled: false,
 
-            vsync_enabled: true,
-            target_fps: None,
+            cap_to_monitor_refresh: true,
         }
     }
 }

@@ -579,13 +579,8 @@ impl eframe::App for SettingsGui {
                                     }
                                 });
                             if monitor_changed {
-                                let new_monitor_hz = self.monitors[self.selected_monitor].refresh_rate as f32;
                                 self.state.update(|s| {
                                     s.last_monitor = Some(self.selected_monitor);
-                                    // Update FPS cap to new monitor's refresh rate if enabled
-                                    if s.target_fps.is_some() {
-                                        s.target_fps = Some(new_monitor_hz);
-                                    }
                                 });
                                 self.restart_overlay_if_needed();
                             }
@@ -724,28 +719,15 @@ impl eframe::App for SettingsGui {
                             ui.add_space(10.0);
 
                             ui.label("Rendering Options:");
-                            let mut vsync_enabled = self.state.read(|s| s.vsync_enabled);
-                            if ui.checkbox(&mut vsync_enabled, "Enable VSync").changed() {
-                                self.state.update(|s| s.vsync_enabled = vsync_enabled);
-                                self.restart_overlay_if_needed();
-                            }
-
-                            ui.add_space(5.0);
-
-                            let target_fps = self.state.read(|s| s.target_fps);
-                            let mut fps_cap_enabled = target_fps.is_some();
+                            let mut cap_to_monitor_refresh = self.state.read(|s| s.cap_to_monitor_refresh);
                             let monitor_hz = if self.selected_monitor < self.monitors.len() {
                                 self.monitors[self.selected_monitor].refresh_rate
                             } else {
                                 60
                             };
 
-                            if ui.checkbox(&mut fps_cap_enabled, format!("Cap to Monitor Refresh Rate ({}Hz)", monitor_hz)).changed() {
-                                if fps_cap_enabled {
-                                    self.state.update(|s| s.target_fps = Some(monitor_hz as f32));
-                                } else {
-                                    self.state.update(|s| s.target_fps = None);
-                                }
+                            if ui.checkbox(&mut cap_to_monitor_refresh, format!("Cap to Monitor Refresh Rate ({}Hz)", monitor_hz)).changed() {
+                                self.state.update(|s| s.cap_to_monitor_refresh = cap_to_monitor_refresh);
                                 self.restart_overlay_if_needed();
                             }
 

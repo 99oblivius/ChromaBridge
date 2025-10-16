@@ -27,8 +27,7 @@ pub struct OverlayState {
     pub spectrum_pair: SpectrumPair,
     pub noise_texture: Option<NoiseTexture>,
     pub hue_mapper: HueMapper,
-    pub vsync_enabled: bool,
-    pub target_fps: Option<f32>,
+    pub monitor_refresh_rate: f32,
 }
 
 pub struct OverlayManager {
@@ -73,14 +72,13 @@ impl OverlayManager {
             return;
         }
 
-        let (spectrum_name, noise_name, strength, monitor_index, vsync_enabled, target_fps) = self.app_state.read(|s| {
+        let (spectrum_name, noise_name, strength, monitor_index, cap_to_monitor_refresh) = self.app_state.read(|s| {
             (
                 s.spectrum_name.clone(),
                 s.noise_texture.clone(),
                 s.strength,
                 s.last_monitor.unwrap_or(0),
-                s.vsync_enabled,
-                s.target_fps,
+                s.cap_to_monitor_refresh,
             )
         });
 
@@ -147,14 +145,13 @@ impl OverlayManager {
                     spectrum_pair,
                     noise_texture,
                     hue_mapper,
-                    vsync_enabled,
-                    target_fps,
+                    monitor_refresh_rate: monitor_info.refresh_rate as f32,
                 };
 
                 let overlay_state = Arc::new(RwLock::new(overlay_state));
 
                 let result = (|| -> Result<()> {
-                    let mut overlay = DCompOverlay::new(overlay_state, monitor_info, monitor_index, vsync_enabled, target_fps)?;
+                    let mut overlay = DCompOverlay::new(overlay_state, monitor_info, monitor_index, cap_to_monitor_refresh)?;
                     overlay.run_message_loop(&running_flag, &frame_stats)
                 })();
 
@@ -375,14 +372,14 @@ struct DCompOverlay {
 
     width: u32,
     height: u32,
-    vsync_enabled: bool,
     frame_latency_waitable: HANDLE,
-    target_fps: Option<f32>,
+    cap_to_monitor_refresh: bool,
+    monitor_refresh_rate: f32,
 }
 
 #[cfg(windows)]
 impl DCompOverlay {
-    unsafe fn new(state: Arc<RwLock<OverlayState>>, monitor_info: MonitorInfo, monitor_index: usize, vsync_enabled: bool, target_fps: Option<f32>) -> Result<Self> {
+    unsafe fn new(state: Arc<RwLock<OverlayState>>, monitor_info: MonitorInfo, monitor_index: usize, cap_to_monitor_refresh: bool) -> Result<Self> {
         let (pos, size) = (monitor_info.pos, monitor_info.size);
         let width = size.0 as u32;
         let height = size.1 as u32;
@@ -444,9 +441,9 @@ impl DCompOverlay {
             desktop_duplication,
             width,
             height,
-            vsync_enabled,
             frame_latency_waitable,
-            target_fps,
+            cap_to_monitor_refresh,
+            monitor_refresh_rate: monitor_info.refresh_rate as f32,
         })
     }
 
@@ -570,9 +567,7 @@ impl DCompOverlay {
                     break;
                 }
 
-                if !self.vsync_enabled {
-                    WaitForSingleObjectEx(self.frame_latency_waitable, INFINITE, false);
-                }
+                WaitForSingleObjectEx(self.frame_latency_waitable, INFINITE, false);
 
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                     if msg.message == WM_QUIT {
@@ -599,8 +594,8 @@ impl DCompOverlay {
                 let _ = self.present_frame();
 
                 // Apply FPS cap if enabled - use time since last frame to account for all overhead
-                if let Some(target_fps) = self.target_fps {
-                    let target_frame_duration = std::time::Duration::from_secs_f32(1.0 / target_fps);
+                if self.cap_to_monitor_refresh {
+                    let target_frame_duration = std::time::Duration::from_secs_f32(1.0 / self.monitor_refresh_rate);
                     let elapsed_since_last = last_frame_time.elapsed();
 
                     if elapsed_since_last < target_frame_duration {
@@ -780,9 +775,8 @@ impl DCompOverlay {
 
     #[cfg(windows)]
     unsafe fn present_frame(&mut self) -> Result<()> {
-        // sync_interval: 0 = no vsync, 1 = vsync to refresh rate
-        let sync_interval = if self.vsync_enabled { 1 } else { 0 };
-        self.swap_chain.Present(sync_interval, DXGI_PRESENT(0)).ok()?;
+        // No vsync - immediate present
+        self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
         Ok(())
     }
 
