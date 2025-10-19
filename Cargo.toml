@@ -2,7 +2,7 @@
 
 [package]
 name = "chromabridge"
-version = "0.2025.35"
+version = "0.2025.36"
 edition = "2021"
 authors = ["99oblivius"]
 

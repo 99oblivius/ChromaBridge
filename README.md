@@ -8,7 +8,7 @@
 An easy to use and low latency color blindness tool for simulated trichromatism.  
 
 ## Quick Start Guide
-Download and Install ChromaBridge by clicking [HERE](https://github.com/99oblivius/ChromaBridge/releases/latest/download/ChromaBridge-Setup-2025.35.exe).
+Download and Install ChromaBridge by clicking [HERE](https://github.com/99oblivius/ChromaBridge/releases/latest/download/ChromaBridge-Setup-2025.36.exe).
 
 <table>
   <tr>
@@ -16,9 +16,9 @@ Download and Install ChromaBridge by clicking [HERE](https://github.com/99oblivi
       <img src="docs/menu_with_steps.png" width="350"/>
     </td>
     <td>
-      <b>Step 1:</b> Select the color blind type. Currently ships with two deutan/protan spectra.<br><br>
+      <b>Step 1:</b> Select the color blind type.<br><br>
         - <b><u>contrast-interlaced</u></b> makes contrasts perceptually similar to trichromats.<br>
-        - <b><u>true-interlaced</u></b> does not shift true blue and yellow.<br><br>
+        - <b><u>true-interlaced</u></b> maintains color fidelity.<br><br>
       <b>Step 2:</b> Select an Interlace Pattern to simulate trichromia.<br><br>
       <b>Step 3:</b> Press <b><u>Start Overlay</u></b>
     </td>
