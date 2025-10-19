@@ -2,9 +2,9 @@
 
 [package]
 name = "chromabridge"
-version = "0.2025.29"
+version = "0.2025.35"
 edition = "2021"
-authors = ["Color Interlacer Contributors"]
+authors = ["99oblivius"]
 
 [dependencies]
 anyhow = "1.0"

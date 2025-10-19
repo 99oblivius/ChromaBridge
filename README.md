@@ -8,6 +8,8 @@
 An easy to use and low latency color blindness tool for simulated trichromatism.  
 
 ## Quick Start Guide
+Download and Install ChromaBridge by clicking [HERE](https://github.com/99oblivius/ChromaBridge/releases/latest/download/ChromaBridge-Setup-2025.35.exe).
+
 <table>
   <tr>
     <td>
