@@ -16,7 +16,7 @@ Download and Install ChromaBridge by clicking [HERE](https://github.com/99oblivi
       <img src="docs/menu_with_steps.png" width="350"/>
     </td>
     <td>
-      <b>Step 1:</b> Select the color blind type. Currently ships with two deutan spectra.<br><br>
+      <b>Step 1:</b> Select the color blind type. Currently ships with two deutan/protan spectra.<br><br>
         - <b><u>contrast-interlaced</u></b> makes contrasts perceptually similar to trichromats.<br>
         - <b><u>true-interlaced</u></b> does not shift true blue and yellow.<br><br>
       <b>Step 2:</b> Select an Interlace Pattern to simulate trichromia.<br><br>
