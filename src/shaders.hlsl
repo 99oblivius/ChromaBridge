@@ -104,9 +104,15 @@ float4 PS_Main(PS_INPUT input) : SV_Target {
         spectrum_hsv = lookup_spectrum_hsv(spectrum1Texture, input_hsv.x);
     }
 
-    float final_hue = lerp(input_hsv.x, spectrum_hsv.x, strength);
-    float final_saturation = input_hsv.y * lerp(1.0, spectrum_hsv.y, strength);
-    float final_value = input_hsv.z * ((1.0 - input_hsv.y) + input_hsv.y * lerp(1.0, spectrum_hsv.z, strength));
+    // Apply the full correction (preserving brightness and saturation)
+    float corrected_hue = spectrum_hsv.x;
+    float corrected_saturation = input_hsv.y * spectrum_hsv.y;
+    float corrected_value = input_hsv.z * ((1.0 - input_hsv.y) + input_hsv.y * spectrum_hsv.z);
 
-    return float4(hsv_to_rgb(float3(final_hue, final_saturation, final_value)), color.a);
+    float3 corrected_rgb = hsv_to_rgb(float3(corrected_hue, corrected_saturation, corrected_value));
+
+    // Interpolate between original and corrected in RGB space
+    float3 final_rgb = lerp(color.rgb, corrected_rgb, strength);
+
+    return float4(final_rgb, color.a);
 }

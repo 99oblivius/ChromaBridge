@@ -36,6 +36,7 @@ pub struct OverlayManager {
     overlay_thread: Mutex<Option<thread::JoinHandle<()>>>,
     last_monitor: Mutex<Option<usize>>,
     frame_stats: Arc<Mutex<Option<(f32, f32)>>>, // (fps, frame_time_ms)
+    overlay_state: Arc<Mutex<Option<Arc<RwLock<OverlayState>>>>>,
 }
 
 impl OverlayManager {
@@ -46,6 +47,7 @@ impl OverlayManager {
             overlay_thread: Mutex::new(None),
             last_monitor: Mutex::new(None),
             frame_stats: Arc::new(Mutex::new(None)),
+            overlay_state: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -63,6 +65,12 @@ impl OverlayManager {
             self.stop();
         } else {
             self.start();
+        }
+    }
+
+    pub fn update_strength(&self, strength: f32) {
+        if let Some(ref state) = *self.overlay_state.lock() {
+            state.write().hue_mapper.set_strength(strength);
         }
     }
 
@@ -122,6 +130,7 @@ impl OverlayManager {
 
         let running_flag = Arc::clone(&self.running);
         let frame_stats = Arc::clone(&self.frame_stats);
+        let overlay_state_ref = Arc::clone(&self.overlay_state);
         *running = true;
         *self.last_monitor.lock() = Some(monitor_index);
 
@@ -149,11 +158,14 @@ impl OverlayManager {
                 };
 
                 let overlay_state = Arc::new(RwLock::new(overlay_state));
+                *overlay_state_ref.lock() = Some(Arc::clone(&overlay_state));
 
                 let result = (|| -> Result<()> {
                     let mut overlay = DCompOverlay::new(overlay_state, monitor_info, monitor_index, cap_to_monitor_refresh)?;
                     overlay.run_message_loop(&running_flag, &frame_stats)
                 })();
+
+                *overlay_state_ref.lock() = None;
 
                 if let Err(e) = result {
                     log_error!("Overlay error: {}", e);
@@ -370,6 +382,8 @@ struct DCompOverlay {
 
     desktop_duplication: Option<DesktopDuplicator>,
 
+    overlay_state: Arc<RwLock<OverlayState>>,
+
     width: u32,
     height: u32,
     frame_latency_waitable: HANDLE,
@@ -439,6 +453,7 @@ impl DCompOverlay {
             capture_texture: None,
             capture_srv: None,
             desktop_duplication,
+            overlay_state: state,
             width,
             height,
             frame_latency_waitable,
@@ -763,6 +778,9 @@ impl DCompOverlay {
         self.d3d_context.PSSetShaderResources(0, Some(&srvs));
         self.d3d_context.PSSetSamplers(0, Some(&[Some(self.sampler_state.clone())]));
         self.d3d_context.PSSetSamplers(1, Some(&[Some(self.spectrum_sampler.clone())]));
+
+        // Update constant buffer with current strength every frame
+        self.update_constant_buffer()?;
         self.d3d_context.PSSetConstantBuffers(0, Some(&[Some(self.constant_buffer.clone())]));
 
         let blend_factor = [1.0f32, 1.0, 1.0, 1.0];
@@ -777,6 +795,43 @@ impl DCompOverlay {
     unsafe fn present_frame(&mut self) -> Result<()> {
         // No vsync - immediate present
         self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    unsafe fn update_constant_buffer(&mut self) -> Result<()> {
+        #[repr(C)]
+        struct SpectrumParams {
+            strength: f32,
+            use_dual_spectrum: i32,
+            use_noise_texture: i32,
+            padding: f32,
+        }
+
+        let state_read = self.overlay_state.read();
+        let params = SpectrumParams {
+            strength: state_read.hue_mapper.strength,
+            use_dual_spectrum: if state_read.spectrum_pair.has_dual_spectrum() { 1 } else { 0 },
+            use_noise_texture: if state_read.noise_texture.is_some() { 1 } else { 0 },
+            padding: 0.0,
+        };
+
+        let mut mapped: D3D11_MAPPED_SUBRESOURCE = std::mem::zeroed();
+        self.d3d_context.Map(
+            &self.constant_buffer,
+            0,
+            D3D11_MAP_WRITE_DISCARD,
+            0,
+            Some(&mut mapped),
+        )?;
+
+        std::ptr::copy_nonoverlapping(
+            &params as *const _ as *const u8,
+            mapped.pData as *mut u8,
+            std::mem::size_of::<SpectrumParams>(),
+        );
+
+        self.d3d_context.Unmap(&self.constant_buffer, 0);
         Ok(())
     }
 

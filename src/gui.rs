@@ -227,8 +227,6 @@ pub struct SettingsGui {
     selected_noise: Option<usize>,
 
     strength: f32,
-    strength_changed: bool,
-    strength_last_change: Instant,
 
     show_advanced: bool,
     show_developer: bool,
@@ -289,8 +287,6 @@ impl SettingsGui {
             noise_files,
             selected_noise,
             strength,
-            strength_changed: false,
-            strength_last_change: Instant::now(),
             show_advanced,
             show_developer,
             status_message: None,
@@ -637,8 +633,8 @@ impl eframe::App for SettingsGui {
                         ui.label("Correction Strength:");
                         if ui.add(egui::Slider::new(&mut self.strength, 0.0..=1.0).text("")).changed() {
                             self.state.update(|s| s.strength = self.strength);
-                            self.strength_changed = true;
-                            self.strength_last_change = Instant::now();
+                            // Update strength in running overlay without restart
+                            self.overlay_manager.update_strength(self.strength);
                         }
                         ui.end_row();
                     });
@@ -730,11 +726,6 @@ impl eframe::App for SettingsGui {
                 }
             });
         });
-
-        if self.strength_changed && self.strength_last_change.elapsed() > std::time::Duration::from_millis(500) {
-            self.strength_changed = false;
-            self.restart_overlay_if_needed();
-        }
     }
 }
 
