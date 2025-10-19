@@ -7,7 +7,23 @@
 </br>
 An easy to use and low latency color blindness tool for simulated trichromatism.  
 
-## UI
+## Quick Start Guide
+<table>
+  <tr>
+    <td>
+      <img src="docs/menu_with_steps.png" width="350"/>
+    </td>
+    <td>
+      <b>Step 1:</b> Select the color blind type. Currently ships with two deutan spectra.<br><br>
+        - <b><u>contrast-interlaced</u></b> makes contrasts perceptually similar to trichromats.<br>
+        - <b><u>true-interlaced</u></b> does not shift true blue and yellow.<br><br>
+      <b>Step 2:</b> Select an Interlace Pattern to simulate trichromia.<br><br>
+      <b>Step 3:</b> Press <b><u>Start Overlay</u></b>
+    </td>
+  </tr>
+</table>
+
+## User Interface
 ### Menu
 ![Graphical User Interface](docs/menu.png)  
 <sub>Click the menu's application icon (top left) rapidly five times to enable Developer options</sub>
