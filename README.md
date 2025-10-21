@@ -40,7 +40,7 @@ Right click:
 </br>
 
 ## Features
-- **Real-time GPU acceleration**: Ultra-low latency and negligable performance impact (suited for running video games alongside)
+- **Real-time GPU acceleration**: Ultra-low latency and negligible performance impact (suited for running video games alongside)
 - **Multi-monitor support**: Automatic refresh rate detection
 - **Automatic startup** option launches ChromaBridge when Windows starts
 ## Limitations
